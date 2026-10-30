@@ -1,0 +1,20 @@
+@startuml
+!include skin.iuml
+skinparam defaultFontSize 15
+skinparam roundCorner 24
+skinparam RectangleBackgroundColor #e5dbff
+skinparam RectangleBorderColor #5f3dc4
+left to right direction
+title Current model: one purchase = one app = one license
+
+rectangle "Application" as A
+rectangle "Plan" as P
+rectangle "Offering\nprice · period" as O
+rectangle "Subscription" as S
+rectangle "License" as L
+
+A --> P : 1 : N
+P --> O : 1 : N
+O --> S : bought as
+S --> L : 1 : 1
+@enduml

@@ -1,0 +1,20 @@
+skinparam backgroundColor transparent
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 13
+skinparam shadowing false
+skinparam roundCorner 8
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam ArrowColor #5c6370
+skinparam SequenceLifeLineBorderColor #adb5bd
+skinparam SequenceGroupBorderColor #91a7ff
+skinparam SequenceGroupBackgroundColor #edf2ff
+skinparam SequenceGroupHeaderFontColor #364fc7
+skinparam NoteBackgroundColor #fff9db
+skinparam NoteBorderColor #ffd43b
+skinparam ParticipantBackgroundColor #e7f5ff
+skinparam ParticipantBorderColor #74c0fc
+skinparam DatabaseBackgroundColor #ebfbee
+skinparam DatabaseBorderColor #8ce99a
+skinparam StateBackgroundColor #e7f5ff
+skinparam StateBorderColor #74c0fc

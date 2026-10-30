@@ -1,0 +1,36 @@
+@startuml
+!include skin.iuml
+skinparam componentStyle rectangle
+skinparam ComponentBackgroundColor #e7f5ff
+skinparam ComponentBorderColor #74c0fc
+skinparam PackageBackgroundColor #f8f9fa
+skinparam PackageBorderColor #ced4da
+left to right direction
+
+actor "Vendor app" as App
+component "AI Gateway" as GW
+component "AI provider" as AI
+package "Catalog" {
+  component "offerings · items\nplans · credit packages\naction prices" as Cat
+}
+package "Billing (Billing team)" #fff4e6 {
+  component "subscriptions · payments\nwebhooks · reconciliation" as Bill
+}
+package "Ours: one Postgres" #ebfbee {
+  component "Grant handler" as GH
+  component "License\nlicenses (subscription, item)" as Lic
+  component "Credits (new)\nwallet · lots · charges\nappend-only ledger" as Cr
+}
+component "Payment provider" as PP
+
+App --> GW : AI action\n+ Idempotency-Key
+GW --> Cr : charge / complete / refund
+GW --> AI : call
+Cr --> Lic : license active?
+Cr --> Cat : action price
+PP --> Bill : webhooks
+Bill --> GH : PaymentSucceeded / Refunded\nSubscriptionCanceled (events)
+GH --> Cat : offering items
+GH --> Lic : grant / revoke
+GH --> Cr : grant lot / revoke
+@enduml

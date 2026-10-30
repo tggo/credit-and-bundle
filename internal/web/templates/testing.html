@@ -1,0 +1,129 @@
+{{define "testing"}}{{template "head" .}}
+<main class="doc">
+
+<h1>Credits &amp; Bundles — як перевірити, що система витримує</h1>
+
+<ul>
+  <li><span class="mvp">MVP</span> — тест уже є в <code>bundle-credit-test</code>, назва поруч. <span class="todo">додати</span> — у проді, ще не написано.</li>
+  <li>Головний інваріант, який звіряє кожен тест із грошима: <code>credit_lots.remaining</code> = Σ <code>credit_ledger.delta</code> по lot, і жоден lot не менше 0.</li>
+  <li>Тести на моках БД тут нічого не доводять: гонки, блокування й UNIQUE живуть у Postgres. Тому основа — інтеграційні тести на реальному Postgres з <code>-race</code>.</li>
+</ul>
+
+<h2>1. Unit — чиста логіка, без БД</h2>
+<ul>
+  <li>Порядок списання lots: вужчий scope першим (bundle → platform), далі bonus перед paid, далі той, що раніше згорає, далі старший. <span class="todo">додати</span> як табличний тест; зараз покрито інтеграційним <code>TestFlow_ScopeAndSpendOrder</code>.</li>
+  <li>Формула refund: <code>apps × частка невикористаного часу + credits × частка невитрачених кредитів</code>. Межі: день 0, останній день, усе витрачено, нічого не витрачено, округлення підсумку до цента (math.Round). <span class="todo">додати</span>.</li>
+  <li><code>request_hash</code>: той самий body з іншим порядком полів дає той самий хеш; інший <code>input</code> дає інший. <span class="todo">додати</span>.</li>
+  <li>Межі шарів: домен не імпортує інший домен напряму. <span class="mvp">MVP</span> <code>TestLayerRules</code>, <code>TestDomainsHaveIface</code>.</li>
+  <li>Схема і Board не розходяться: кожна таблиця й колонка описана, поля й кардинальність на Board = схема. <span class="mvp">MVP</span> <code>TestBoardFieldsMatchSchema</code>, <code>TestBoardCardinalityMatchesSchema</code>, <code>TestEveryTableAndKeyColumnIsDescribed</code>.</li>
+</ul>
+
+<h2>2. Integration — реальний Postgres, повні сценарії</h2>
+
+<p class="t">Видача прав (grant handler)</p>
+<ul>
+  <li>Bundle → license на кожен plan item + один <code>credit_lots</code> зі scope на застосунки бандла. <span class="mvp">MVP</span> <code>TestFlow_ScopeAndSpendOrder</code>.</li>
+  <li>Підписка з кредитами і без. <span class="mvp">MVP</span> <code>TestFlow_SubscriptionWithAndWithoutCredits</code>.</li>
+  <li>In-app пакет працює лише у своєму застосунку. <span class="mvp">MVP</span> <code>TestFlow_InAppPackOnlyForItsApp</code>.</li>
+  <li>Продовження зсуває <code>licenses.due_date</code>, старий lot згорає. <span class="mvp">MVP</span> <code>TestFlow_RenewalAndExpiry</code>.</li>
+  <li>Дубль події, події не по порядку, refund раніше за paid. <span class="mvp">MVP</span> <code>TestWebhooks_OutOfOrderAndDuplicates</code>, <code>TestWebhooks_RefundBeforePaidIsParked</code>, <code>TestWebhooks_TerminalStateAndPastDue</code>.</li>
+</ul>
+
+<p class="t">Списання (charge)</p>
+<ul>
+  <li>Провайдер 5xx → кредити повертаються в ті самі lots. <span class="mvp">MVP</span> <code>TestFlow_ProviderFailureRefundsSameLots</code>.</li>
+  <li>Одне списання з двох lots. <span class="mvp">MVP</span> <code>TestRace_ChargeSpanningTwoLots</code>.</li>
+  <li>402 не зберігається як результат ключа: після поповнення той самий ключ проходить. <span class="mvp">MVP</span> <code>TestIdempotency_402IsNotStored</code>.</li>
+  <li>Replay після відкликання ліцензії віддає збережений результат, не 403. <span class="mvp">MVP</span> <code>TestIdempotency_ReplayAfterLicenseRevoked</code>.</li>
+</ul>
+
+<p class="t">Refund і sweeper</p>
+<ul>
+  <li>Частковий refund, refund після past_due не чіпає раніше оплачений період. <span class="mvp">MVP</span> <code>TestFlow_PartialRefund</code>, <code>TestFlow_RefundAfterPastDueKeepsEarlierPeriod</code>.</li>
+  <li>Повернення у відкликаний або протермінований lot згорає, не оживляє його. <span class="mvp">MVP</span> <code>TestRefund_IntoRevokedLotIsBurned</code>, <code>TestRefund_IntoDrainedRevokedLotIsBurned</code>, <code>TestSweeper_RefundIntoExpiredLotIsBurned</code>.</li>
+  <li>Процес впав після debit → sweeper повертає кредити. <span class="mvp">MVP</span> <code>TestSweeper_CrashAfterDebitReturnsCredits</code>.</li>
+  <li>Втрачений webhook знаходить reconciliation. <span class="mvp">MVP</span> <code>TestReconcile_LostWebhookFound</code>.</li>
+</ul>
+
+<p class="t">Контракт з Billing</p>
+<ul>
+  <li>Contract test на три події (<code>PaymentSucceeded</code>, <code>PaymentRefunded</code>, <code>SubscriptionCanceled</code>): схема полів, стабільний <code>payment_id</code> на повторах. <span class="todo">додати</span>, спільно з Billing.</li>
+</ul>
+
+<h2>3. Concurrency — те, що ламається лише під паралельністю</h2>
+<ul>
+  <li>Один гаманець, N пристроїв одночасно: успішних рівно стільки, скільки вистачає кредитів, решта 402, баланс ніколи &lt; 0. <span class="mvp">MVP</span> <code>TestRace_OneBalanceManyDevices</code>.</li>
+  <li>Той самий <code>Idempotency-Key</code> паралельно: одне списання, решта 409 або replay. <span class="mvp">MVP</span> <code>TestIdempotency_SameKeyConcurrent</code>.</li>
+  <li>Багато клієнтів одночасно — без deadlock (порядок блокувань: <code>credit_accounts</code> → lots за id). <span class="mvp">MVP</span> <code>TestRace_ManyCustomersNoDeadlock</code>.</li>
+  <li>Refund паралельно зі списаннями. <span class="mvp">MVP</span> <code>TestRefund_RacesChargesWithoutDeadlock</code>.</li>
+  <li>Запуск: <code>go test -race -count=20 ./...</code> — гонка, що проявляється раз на 20 прогонів, теж бага.</li>
+</ul>
+
+<h2>4. Load — чи тримає навантаження</h2>
+<ul>
+  <li>Інструмент: k6 або vegeta на staging з копією схеми і реалістичними даними. <span class="todo">додати</span>; в MVP навантажувальних тестів немає.</li>
+  <li>Профіль 1, звичайний: багато клієнтів, у кожного свій гаманець. Мета: p99 <code>POST /charges</code> без провайдера &lt; 50 мс на цільовому RPS. Провайдер мокаємо з затримкою 1–10 с, щоб міряти нашу частину.</li>
+  <li>Профіль 2, гарячий гаманець: 50+ паралельних запитів в один <code>credit_accounts</code>. <code>FOR UPDATE</code> робить їх послідовними — міряємо, з якого паралелізму ростуть таймаути. Очікувано нормально: транзакція коротка, провайдер поза нею.</li>
+  <li>Профіль 3, сплеск продовжень: тисячі <code>PaymentSucceeded</code> на початку місяця. Міряємо лаг від події до видачі прав.</li>
+  <li>Soak 1–2 год: ріст <code>credit_ledger</code>, пул з'єднань pgx, кількість <code>in_progress</code> не росте.</li>
+  <li>Після кожного прогону — той самий інваріант: Σ журналу = залишки.</li>
+</ul>
+
+<h2>5. Edge cases — список, який треба пройти</h2>
+<table>
+  <tr><th>Випадок</th><th>Очікувано</th><th></th></tr>
+  <tr><td>Кредитів рівно на дію</td><td>201, баланс 0</td><td class="todo">додати</td></tr>
+  <tr><td>Бракує 1 кредиту</td><td>402, нічого не записано</td><td class="mvp">MVP</td></tr>
+  <tr><td>Lot згорає під час запиту</td><td>409 <code>lot_changed_retry</code>, повтор тим самим ключем проходить</td><td class="todo">додати</td></tr>
+  <tr><td>Той самий ключ, інший body</td><td>422 <code>idempotency_key_reused</code></td><td class="mvp">MVP</td></tr>
+  <tr><td>Провайдер відповів після sweeper</td><td>502 <code>timed_out</code>, результат не віддаємо, кредити вже повернуті</td><td class="mvp">MVP</td></tr>
+  <tr><td>Контент заблоковано провайдером</td><td>201, <code>blocked: true</code>, списано (рішення бізнесу — питання)</td><td class="mvp">MVP</td></tr>
+  <tr><td>Chargeback</td><td>гаманець blocked → 403 <code>account_blocked</code></td><td class="todo">додати</td></tr>
+  <tr><td>Refund у день покупки / в останній день</td><td>майже повна сума / ~0; частка apps ділиться націло, підсумок округлюється до цента</td><td class="todo">додати</td></tr>
+  <tr><td>Refund повністю витраченого пакета</td><td>$0, кнопки refund немає</td><td class="mvp">MVP</td></tr>
+  <tr><td>Grace period після past_due</td><td>доступ і кредити живуть <code>grace_days</code></td><td class="todo">додати (TD-1)</td></tr>
+  <tr><td>Refund платежу, поки charge ще йде і вже звів lot до 0</td><td>lot теж позначено <code>revoked_at</code>; кредити, які потім поверне charge або sweeper, одразу згорають</td><td class="mvp">MVP</td></tr>
+  <tr><td>Невідомий <code>payment_id</code> у refund</td><td>retry, не drop</td><td class="mvp">MVP</td></tr>
+  <tr><td>Бандл з двома планами одного застосунку</td><td>UK <code>(subscription_id, offering_item_id)</code> дає дві ліцензії</td><td class="todo">додати</td></tr>
+</table>
+
+<h2>6. Міграція</h2>
+<ul>
+  <li>Shadow compare на етапі «Read items»: старий і новий шлях рахують права кожного клієнта, розбіжність логуємо. Ворота: 0 розбіжностей за 7 днів.</li>
+  <li>Backfill на копії проду: кількість licenses до = після, жоден активний клієнт не втратив доступ.</li>
+  <li>Rollback кожного кроку прогнаний на staging до проду. Деталі в <a href="/migration">Migration</a>.</li>
+</ul>
+
+<h2>7. Що моніторити</h2>
+
+<p class="t">Гроші — page (будимо людину)</p>
+<ul>
+  <li>Розбіжність <code>credit_lots.remaining</code> ≠ Σ <code>credit_ledger.delta</code>: <b>&gt; 0 → page</b>. Нічний job по всіх lots, плюс по змінених за годину.</li>
+  <li>Платіж без виданих прав &gt; 5 хв: <b>page</b>. Звірка <code>payments</code> з <code>licenses</code>/<code>credit_lots</code> по <code>payment_id</code>.</li>
+  <li>Від'ємний <code>credit_lots.remaining</code>: <b>page</b> (CHECK має не дати, але перевіряємо).</li>
+</ul>
+
+<p class="t">Надійність — alert</p>
+<ul>
+  <li><code>credit_charges</code> в <code>in_progress</code> &gt; 5 хв: <b>alert</b> — sweeper не працює.</li>
+  <li>Частка 502 від провайдера &gt; 5% за 15 хв: <b>alert</b>, перемкнути провайдера.</li>
+  <li>Лаг обробки подій Billing (час події → видача прав) p99 &gt; 1 хв; черга retry росте.</li>
+  <li>Розбіжності reconciliation з Billing &gt; 0 після нічного прогону.</li>
+  <li>Postgres: lock wait на <code>credit_accounts</code>, deadlocks &gt; 0, пул з'єднань &gt; 80%.</li>
+</ul>
+
+<p class="t">API — RED-метрики на кожен endpoint</p>
+<ul>
+  <li>Rate, errors, duration для <code>POST /charges</code> і <code>GET /balance</code>, окремо наша частина і провайдер.</li>
+  <li>Розбивка по кодах: ріст 409 <code>lot_changed_retry</code> = гарячі гаманці; ріст 422 = клієнт неправильно генерує ключі; ріст 403 <code>no_active_license</code> = збій видачі прав.</li>
+</ul>
+
+<p class="t">Бізнес — дашборд, тижневий огляд</p>
+<ul>
+  <li>Собівартість AI / виручка по кожній дії (<code>action_code</code>) — чи ціна в <code>action_prices</code> покриває провайдера.</li>
+  <li>Згорілі кредити: скільки куплено і не витрачено до <code>expires_at</code>.</li>
+  <li>Частка refund і chargeback по offering.</li>
+</ul>
+
+</main>
+{{template "foot" .}}{{end}}

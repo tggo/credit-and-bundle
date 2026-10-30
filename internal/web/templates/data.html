@@ -1,0 +1,87 @@
+{{define "data"}}{{template "head" .}}
+<main class="data-grid">
+  <section>
+    <h2>Tables <small>live</small></h2>
+    <div id="tables" hx-get="/frag/tables?c={{.Customer}}" hx-trigger="load, sse:changed throttle:500ms">loading…</div>
+  </section>
+  <section>
+    <div class="data-bar">
+      <label class="small"><input type="checkbox" id="only" checked> only {{.Customer}}</label>
+      <label class="small">rows <select id="limit"><option>50</option><option>100</option><option>500</option></select></label>
+      <span class="muted small">Read-only view of Postgres. Updates live after every action in the Simulator.</span>
+    </div>
+    <div id="table" hx-get="/frag/table" hx-trigger="load, sse:changed throttle:500ms, refresh"
+      hx-vals='js:{view: window.curView || "rows", t: window.curTable || "credit_ledger", c: "{{.Customer}}", only: document.getElementById("only").checked ? "1" : "0", limit: document.getElementById("limit").value}'>loading…</div>
+  </section>
+</main>
+<script>
+  window.curTable = new URLSearchParams(location.search).get("t") || "credit_ledger";
+  window.curView = "rows";
+  function setView(v) { window.curView = v; htmx.trigger("#table", "refresh"); }
+  function pick(t) { window.curTable = t; history.replaceState(null, "", "?c={{.Customer}}&t=" + t);
+    document.querySelectorAll(".tlist a").forEach(a => a.classList.toggle("on", a.dataset.t === t));
+    htmx.trigger("#table", "refresh"); }
+  document.getElementById("only").addEventListener("change", () => htmx.trigger("#table", "refresh"));
+  document.getElementById("limit").addEventListener("change", () => htmx.trigger("#table", "refresh"));
+  document.body.addEventListener("htmx:afterSwap", e => { if (e.target.id === "tables")
+    document.querySelectorAll(".tlist a").forEach(a => a.classList.toggle("on", a.dataset.t === window.curTable)); });
+</script>
+{{template "foot" .}}{{end}}
+
+{{define "tables_frag"}}
+<div class="tlist">
+{{$svc := ""}}
+{{range .Tables}}
+  {{if ne .Service $svc}}<div class="tsvc">{{if .Service}}{{.Service}}{{else}}other{{end}}</div>{{$svc = .Service}}{{end}}
+  <a href="#" data-t="{{.Name}}" title="{{.Comment}}" onclick="pick('{{.Name}}'); return false;"><span>{{.Name}}</span><b>{{.Rows}}</b></a>
+{{end}}
+</div>
+{{end}}
+
+{{define "table_frag"}}
+{{if .Missing}}<p class="muted">Unknown table.</p>{{else}}
+<div class="thead">
+  <h2>{{.Name}} <small>{{.Total}} rows{{if .Filter}} · where {{.Filter}}{{end}}{{if .Order}} · newest first by {{.Order}}{{end}}</small></h2>
+  <span class="seg">
+    <button class="{{if ne .View "structure"}}on{{end}}" onclick="setView('rows')">Rows</button>
+    <button class="{{if eq .View "structure"}}on{{end}}" onclick="setView('structure')">Structure</button>
+  </span>
+</div>
+{{if .Schema.Comment}}<p class="tcomment">{{.Schema.Comment}}</p>{{end}}
+{{if eq .View "structure"}}
+<div class="tscroll">
+<table class="dtable stable">
+<tr><th>column</th><th>type</th><th>keys</th><th>null</th><th>default</th><th>description · checks</th></tr>
+{{range .Schema.Cols}}
+<tr>
+  <td><b>{{.Name}}</b></td><td>{{.Type}}</td>
+  <td>{{if .PK}}<span class="k k-pk">PK</span>{{end}}{{if .Unique}}<span class="k k-uq">UQ</span>{{end}}{{if .FK}}<span class="k k-fk">FK</span> <a href="#" onclick="pick('{{.FK.Table}}'); return false;">→ {{.FK.Table}}.{{.FK.Column}}</a>{{end}}</td>
+  <td>{{if .NotNull}}not null{{else}}<span class="muted">null</span>{{end}}</td>
+  <td class="muted">{{.Default}}</td>
+  <td class="wrap">{{.Comment}}{{range .Checks}}<div class="muted small">{{.}}</div>{{end}}</td>
+</tr>
+{{end}}
+</table>
+</div>
+<div class="sgrid">
+  <div><h3>Referenced by</h3>{{if not .Schema.RefBy}}<p class="muted small">nothing</p>{{end}}
+    {{range .Schema.RefBy}}<div class="small"><a href="#" onclick="pick('{{.Table}}'); return false;">{{.Table}}.{{.Column}}</a> → this.id</div>{{end}}</div>
+  <div><h3>Constraints</h3>
+    {{range .Schema.Uniques}}<div class="small"><span class="k k-uq">UQ</span> {{.}}</div>{{end}}
+    {{range .Schema.Checks}}<div class="small"><span class="k">CHECK</span> {{.}}</div>{{end}}
+    {{if and (not .Schema.Uniques) (not .Schema.Checks)}}<p class="muted small">column-level only</p>{{end}}</div>
+  <div><h3>Indexes</h3>{{range .Schema.Indexes}}<div class="small mono">{{.}}</div>{{end}}</div>
+</div>
+<h3>DDL</h3>
+<pre class="ddl">{{.Schema.DDL}}</pre>
+{{else}}
+<div class="tscroll">
+<table class="dtable">
+<tr>{{range .Head}}<th title="{{.Type}}{{if .Comment}} — {{.Comment}}{{end}}">{{.Name}}{{if .PK}} <span class="k k-pk">PK</span>{{end}}{{if .FK}} <span class="k k-fk" title="→ {{.FK.Table}}.{{.FK.Column}}">FK</span>{{end}}{{if .Unique}} <span class="k k-uq">UQ</span>{{end}}</th>{{end}}</tr>
+{{range .Rows}}<tr>{{range .}}<td title="{{.}}">{{.}}</td>{{end}}</tr>{{end}}
+</table>
+</div>
+{{if not .Rows}}<p class="muted">No rows{{if .Filter}} for this customer{{end}}.</p>{{end}}
+{{end}}
+{{end}}
+{{end}}

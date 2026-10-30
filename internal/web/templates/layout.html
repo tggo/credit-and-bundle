@@ -1,0 +1,50 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Credits & Bundles MVP</title>
+<link rel="stylesheet" href="/static/app.css?v={{.V}}">
+<script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+<script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+</head>
+<body{{if not .NoSSE}} hx-ext="sse" sse-connect="/events"{{end}}>
+<header>
+  <b>Credits &amp; Bundles</b>
+  <nav>
+    <a href="/?c={{.Customer}}" class="{{if eq .Page "sim"}}on{{end}}">Simulator</a>
+    <a href="/webhooks?c={{.Customer}}" class="{{if eq .Page "webhooks"}}on{{end}}">Webhooks</a>
+    <a href="/reconcile?c={{.Customer}}" class="{{if eq .Page "reconcile"}}on{{end}}">Reconciliation</a>
+    <a href="/board?c={{.Customer}}" class="{{if eq .Page "board"}}on{{end}}">Board</a>
+    <a href="/diagrams?c={{.Customer}}" class="{{if eq .Page "diagrams"}}on{{end}}">Diagrams</a>
+    <a href="/data?c={{.Customer}}" class="{{if eq .Page "data"}}on{{end}}">Data</a>
+    <a href="/api?c={{.Customer}}" class="{{if eq .Page "api"}}on{{end}}">API</a>
+    <a href="/tables?c={{.Customer}}" class="{{if eq .Page "tables"}}on{{end}}">Tables</a>
+    <a href="/migration?c={{.Customer}}" class="{{if eq .Page "migration"}}on{{end}}">Migration</a>
+    <a href="/testing?c={{.Customer}}" class="{{if eq .Page "testing"}}on{{end}}">Testing</a>
+  </nav>
+  <span class="clock">🕒 <span hx-get="/frag/clock" hx-trigger="sse:changed">{{.Clock}}</span></span>
+  <span class="cust">customer:
+    {{range .Customers}}<a href="?c={{.Handle}}" class="{{if eq .Handle $.Customer}}on{{end}}" title="{{.ID}}">{{.Handle}} <span class="uid">{{short .ID}}</span></a>{{end}}
+  </span>
+  <span class="clockbtns">
+    <button hx-post="/sim/advance" hx-vals='{"days":"1"}' hx-swap="none">+1 day</button>
+    <button hx-post="/sim/advance" hx-vals='{"days":"15"}' hx-swap="none">+15 days</button>
+    <button hx-post="/sim/advance" hx-vals='{"days":"31"}' hx-swap="none">+31 days</button>
+    <button class="danger" hx-post="/sim/reset" hx-swap="none" hx-prompt="Password to reset all data">reset</button>
+  </span>
+</header>
+{{end}}
+
+{{define "logpanel"}}
+<section class="log">
+  <h2>Live log <small>SSE</small></h2>
+  <ul sse-swap="log" hx-swap="afterbegin">{{.LogHTML}}</ul>
+</section>
+{{end}}
+
+{{define "foot"}}
+<div hidden hx-get="/frag/clock" hx-trigger="sse:reload" hx-on::before-request="event.preventDefault(); location.reload()"></div>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,14 @@
+@startuml
+!include skin.iuml
+hide empty description
+[*] --> created : subscription.created
+created --> active : invoice.paid
+active --> active : invoice.paid (renewal)
+active --> past_due : invoice.failed
+past_due --> active : invoice.paid
+created --> canceled : subscription.canceled
+active --> canceled : subscription.canceled\npayment.refunded
+past_due --> canceled : subscription.canceled
+canceled --> [*]
+note right of canceled : terminal — a late\nsubscription.created is rejected
+@enduml

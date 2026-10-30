@@ -1,0 +1,123 @@
+{{define "api"}}{{template "head" .}}
+<main class="api-page">
+  <h2>API contracts</h2>
+  <p class="muted">Two public endpoints of the Credits service, called by the AI Gateway on behalf of a vendor app. Below them: the events we take from Billing. Both endpoints are live on this server.</p>
+
+  <section class="api-ep">
+    <h3><span class="m post">POST</span> /api/v1/credits/charges</h3>
+    <p>Charge one AI action. Credits are taken at the start for the fixed price of the action and returned only on a failure on our side.</p>
+    <div class="api-cols">
+<pre class="code">Headers
+  Idempotency-Key: &lt;uuid, one per user action;
+                    the same on every retry&gt;
+  X-Customer-Id:   &lt;customer, set by the Gateway&gt;
+
+Request
+{
+  "application_id": "uuid",
+  "action_code":    "ai.generate",
+  "input":          { … }
+}
+
+Response 201
+{
+  "charge_id": "uuid",
+  "status":    "completed",
+  "charged":   80,          // credits taken
+  "available": 9920,        // left for THIS app
+  "result":    { … },       // AI result
+  "blocked":   false        // content policy: still charged
+}</pre>
+      <table class="t api-err">
+        <tr><th>Code</th><th>error</th><th>Meaning</th></tr>
+        <tr><td>200</td><td>—</td><td>Replay: the key was already completed, the stored result comes back, nothing is charged again</td></tr>
+        <tr><td>400</td><td>idempotency_key_required</td><td>No Idempotency-Key header</td></tr>
+        <tr><td>400</td><td>customer_required</td><td>No or malformed <code>X-Customer-Id</code></td></tr>
+        <tr><td>400</td><td>invalid_application_id</td><td>Missing or not a uuid. Nothing is charged</td></tr>
+        <tr><td>402</td><td>insufficient_credits</td><td>Not enough credits usable in this app; <code>available</code> and <code>required</code> in the body. Nothing is stored</td></tr>
+        <tr><td>403</td><td>no_active_license</td><td>The customer has no active license for this app</td></tr>
+        <tr><td>403</td><td>account_blocked</td><td>Wallet blocked (chargeback)</td></tr>
+        <tr><td>404</td><td>unknown_action</td><td>No price for this (app, action)</td></tr>
+        <tr><td>404</td><td>unknown_customer</td><td>No wallet for the customer</td></tr>
+        <tr><td>409</td><td>in_progress</td><td>The same key is still running; retry later with the same key</td></tr>
+        <tr><td>409</td><td>lot_changed_retry</td><td>A lot changed under the debit; safe to retry with the same key</td></tr>
+        <tr><td>422</td><td>idempotency_key_reused</td><td>The same key with a different body</td></tr>
+        <tr><td>502</td><td>upstream_failed</td><td>Provider 5xx; credits already returned, <code>refunded: true</code></td></tr>
+        <tr><td>502</td><td>timed_out</td><td>Provider answered after the sweeper had returned the credits; <code>refunded: true</code></td></tr>
+      </table>
+    </div>
+    <p class="muted small">Rules: a known key answers before any other check, so a retry after a refund still gets its 200. One key = one charge, whatever the number of parallel copies.</p>
+  </section>
+
+  <section class="api-ep">
+    <h3><span class="m get">GET</span> /api/v1/credits/balance?application_id=…</h3>
+    <p>What the customer can spend here, and where the rest of the balance sits. Answers "why does the site show 10 500 and the app 500".</p>
+    <div class="api-cols">
+<pre class="code">Headers
+  X-Customer-Id: &lt;customer&gt;
+
+Response 200
+{
+  "application_id": "uuid",
+  "available": 500,          // usable in this app
+  "total":     10500,        // whole wallet
+  "by_source": [
+    { "label": "Design+ bundle · Oct 26",
+      "source": "bundle", "scope": "bundle",
+      "kind": "paid", "remaining": 10000,
+      "applies_here": false,
+      "expires_at": "2026-11-26T…" },
+    { "label": "Credit pack 500",
+      "source": "pack", "scope": "platform",
+      "kind": "paid", "remaining": 500,
+      "applies_here": true,
+      "expires_at": "2027-10-27T…" }
+  ]
+}</pre>
+      <table class="t api-err">
+        <tr><th>Code</th><th>error</th><th>Meaning</th></tr>
+        <tr><td>200</td><td>—</td><td>Without <code>application_id</code>: the whole wallet (the site's view), <code>available = total</code>, no <code>applies_here</code> filter</td></tr>
+        <tr><td>400</td><td>customer_required</td><td>No or malformed <code>X-Customer-Id</code></td></tr>
+        <tr><td>400</td><td>invalid_application_id</td><td><code>application_id</code> is not a uuid</td></tr>
+        <tr><td>404</td><td>unknown_application</td><td>No such app. Never answered as "0 here": the app would show a wrong balance</td></tr>
+        <tr><td>404</td><td>unknown_customer</td><td>No wallet for the customer</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="api-ep">
+    <h3><span class="m ev">EVENTS</span> from Billing → our grant handler</h3>
+    <p>Billing owns webhooks, subscriptions and payments. We take three domain events, at-least-once, possibly duplicated or out of order.</p>
+    <div class="api-cols">
+<pre class="code">PaymentSucceeded {
+  payment_id, subscription_id, offering_id,
+  customer_id, period_start, period_end, amount
+}
+PaymentRefunded {
+  payment_id, refund_amount
+}
+SubscriptionCanceled {
+  subscription_id, at_period_end
+}</pre>
+      <table class="t api-err">
+        <tr><th>Event</th><th>What we do</th></tr>
+        <tr><td>PaymentSucceeded</td><td>One transaction: a license per plan item (UK subscription + item; renewal moves due_date), a lot per credit item (UK payment + item). A duplicate grants nothing</td></tr>
+        <tr><td>PaymentRefunded</td><td>Revoke the lots of that payment; licenses end with the earlier paid period. Unknown payment_id → retry, not drop</td></tr>
+        <tr><td>SubscriptionCanceled</td><td>Cancel at period end: licenses and lots live until their own dates, no renewal grants new ones</td></tr>
+      </table>
+    </div>
+    <p class="muted small">We ask Billing for: a stable payment_id across retries, replay of events by payment_id / subscription_id, and <code>kind = one_time</code> subscriptions for credit packs.</p>
+  </section>
+
+  <section class="api-ep">
+    <h3>Try it</h3>
+<pre class="code">curl -X POST https://credit-and-bundle.ihatebot.com/api/v1/credits/charges \
+  -H 'X-Customer-Id: &lt;customer uuid&gt;' -H 'Idempotency-Key: '$(uuidgen) \
+  -H 'Content-Type: application/json' \
+  -d '{"application_id":"&lt;app uuid&gt;","action_code":"ai.generate","input":"cat"}'
+
+curl 'https://credit-and-bundle.ihatebot.com/api/v1/credits/balance?application_id=&lt;app uuid&gt;' -H 'X-Customer-Id: &lt;customer uuid&gt;'</pre>
+    <p class="muted small">Customer and app uuids are on the Data page (tables customers, applications). Every call shows up live in the Simulator log.</p>
+  </section>
+</main>
+{{template "foot" .}}{{end}}

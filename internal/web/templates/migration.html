@@ -1,0 +1,280 @@
+{{define "migration"}}{{template "head" .}}
+<main class="doc">
+
+<h1>Credits &amp; Bundles — міграція даних</h1>
+
+<ul>
+  <li>Мета: перейти з поточної моделі (offering = один plan) на offering з items, без даунтайму і без перевипуску ключів ліцензій.</li>
+  <li>Принцип: expand → contract. Спершу тільки додаємо, читаємо з нового за флагом, і лише в кінці видаляємо старе.</li>
+  <li>Для чинних клієнтів нічого не змінюється: ті самі subscriptions, ті самі <code>licenses.key</code>, наступне продовження йде по тому самому offering — тепер це offering з одним item.</li>
+  <li>Кожен крок має умову переходу (gate) і спосіб відкату. Відкат неможливий лише на останньому кроці.</li>
+</ul>
+
+<h2>Що було і що стане</h2>
+
+<p class="t"><code>plans</code></p>
+<ul>
+  <li>Було: <code>id</code>, <code>application_id</code>, <code>name</code>, <code>slot_count</code>, <code>licensing_model</code>, <code>trial_period</code>, <code>grace_period</code>.</li>
+  <li>Стане: <code>trial_period</code> і <code>grace_period</code> переїжджають в <code>offerings.trial_days</code> / <code>grace_days</code>. Решта без змін.</li>
+  <li>Старі колонки видаляємо лише на кроці Contract.</li>
+</ul>
+
+<p class="t"><code>offerings</code></p>
+<ul>
+  <li>Було: <code>id</code>, <code>plan_id</code>, <code>price</code> (decimal), <code>billing_period</code>.</li>
+  <li>Додаємо: <code>name</code>, <code>kind</code> (<code>single</code> | <code>bundle</code> | <code>credit_pack</code>), <code>price_minor</code> (bigint), <code>currency</code>, <code>trial_days</code>, <code>grace_days</code>, <code>status</code>.</li>
+  <li>Міняємо: <code>plan_id</code> стає nullable (у бандла і пакета кредитів його немає), на кроці Contract видаляємо.</li>
+  <li>Міняємо: <code>price</code> decimal → <code>price_minor</code> цілі центи; decimal видаляємо на кроці Contract.</li>
+  <li><code>billing_period</code> отримує CHECK: <code>month</code> | <code>one_time</code>.</li>
+</ul>
+
+<p class="t"><code>offering_items</code> — нова</p>
+<ul>
+  <li><code>offering_id</code> → <code>offerings.id</code>; рівно одне з <code>plan_id</code> → <code>plans.id</code> або <code>credit_package_id</code> → <code>credit_packages.id</code>.</li>
+  <li><code>allocation_weight</code>, <code>quantity</code>, <code>item_type</code>.</li>
+  <li>На час міграції — UNIQUE (<code>offering_id</code>, <code>plan_id</code>): на ньому тримається ідемпотентність backfill.</li>
+</ul>
+
+<p class="t"><code>credit_packages</code>, <code>action_prices</code> — нові, порожні</p>
+<ul>
+  <li>Даних для перенесення немає. Наповнюються, коли вмикаємо кредити.</li>
+</ul>
+
+<p class="t"><code>subscriptions</code> і <code>payments</code> — зона Billing</p>
+<ul>
+  <li>Було: <code>subscriptions.next_billing_at</code>, <code>subscriptions.payment_ref</code> — один платіж на підписку.</li>
+  <li>Стане: <code>subscriptions.kind</code> (<code>recurring</code> | <code>one_time</code>), <code>current_period_start</code> / <code>current_period_end</code>; платежі — окрема <code>payments</code>, рядок на період.</li>
+  <li>Це робить команда Billing. Нам від них треба: стабільний <code>payment_id</code>, події PaymentSucceeded / PaymentRefunded / SubscriptionCanceled, <code>kind = one_time</code> для пакетів кредитів.</li>
+  <li>Для чинних підписок Billing створює по одному рядку <code>payments</code> на поточний оплачений період (з <code>payment_ref</code> і <code>next_billing_at</code>) — інакше рефанд поточного періоду не знайде lots і межі періоду.</li>
+</ul>
+
+<p class="t"><code>licenses</code></p>
+<ul>
+  <li>Було: <code>id</code>, <code>subscription_id</code>, <code>customer_id</code>, <code>key</code> UK, <code>status</code>, <code>due_date</code>.</li>
+  <li>Додаємо: <code>offering_item_id</code> → <code>offering_items.id</code>, <code>application_id</code> → <code>applications.id</code>.</li>
+  <li>Додаємо: UNIQUE (<code>subscription_id</code>, <code>offering_item_id</code>), індекс (<code>customer_id</code>, <code>application_id</code>) WHERE <code>status = 'active'</code>.</li>
+  <li><code>key</code>, <code>status</code>, <code>due_date</code> не чіпаємо.</li>
+</ul>
+
+<p class="t">Credits — нові, порожні</p>
+<ul>
+  <li><code>credit_accounts</code>, <code>credit_lots</code>, <code>lot_scope_apps</code>, <code>credit_charges</code>, <code>credit_ledger</code>.</li>
+  <li>Історичних кредитів немає. Єдиний backfill — <code>credit_accounts</code> на кожного чинного клієнта.</li>
+</ul>
+
+<h2>Крок 0. Підготовка</h2>
+<ul>
+  <li>Feature flags, всі вимкнені:
+    <ul>
+      <li><code>catalog.write_items</code> — новий код пише items;</li>
+      <li><code>catalog.read_items</code> — читання складу з items, по застосунках;</li>
+      <li><code>catalog.shadow_compare</code> — читати обома шляхами і порівнювати;</li>
+      <li><code>sales.bundles</code>, <code>sales.credit_packs</code> — продаж нових offerings;</li>
+      <li><code>credits.gateway</code> — списання, по застосунках.</li>
+    </ul></li>
+  <li>Почати інвентаризацію читачів <code>offerings.plan_id</code> (див. крок 5) вже зараз — вона найдовша.</li>
+  <li>Знімок прод-бази для репетиції: увесь сценарій спершу проганяємо на копії і міряємо час backfill.</li>
+  <li>Дашборд міграції: лічильники з gate-запитів нижче.</li>
+</ul>
+
+<h2>Крок 1. Expand — схема</h2>
+<ul>
+  <li>Усі зміни сумісні зі старим кодом: тільки нові таблиці і nullable-колонки, нічого не видаляємо.</li>
+  <li>Онлайн, без довгих блокувань:
+    <ul>
+      <li><code>ADD COLUMN</code> без default або з константним default — миттєво (Postgres 11+);</li>
+      <li>індекси — <code>CREATE INDEX CONCURRENTLY</code>;</li>
+      <li>FK і CHECK — <code>NOT VALID</code>, потім окремо <code>VALIDATE CONSTRAINT</code> (не блокує запис);</li>
+      <li><code>SET lock_timeout = '3s'</code> на кожну DDL, щоб не стати в чергу за довгою транзакцією.</li>
+    </ul></li>
+</ul>
+<pre>CREATE TABLE offering_items (...);  CREATE TABLE credit_packages (...);  CREATE TABLE action_prices (...);
+CREATE TABLE credit_accounts (...); credit_lots, lot_scope_apps, credit_charges, credit_ledger
+
+ALTER TABLE offerings ADD COLUMN name text, ADD COLUMN kind text, ADD COLUMN price_minor bigint,
+  ADD COLUMN currency text, ADD COLUMN trial_days int, ADD COLUMN grace_days int,
+  ADD COLUMN status text DEFAULT 'active';
+ALTER TABLE offerings ALTER COLUMN plan_id DROP NOT NULL;
+
+ALTER TABLE licenses ADD COLUMN offering_item_id uuid, ADD COLUMN application_id uuid;
+ALTER TABLE licenses ADD CONSTRAINT licenses_item_fk FOREIGN KEY (offering_item_id)
+  REFERENCES offering_items(id) NOT VALID;
+CREATE UNIQUE INDEX CONCURRENTLY offering_items_offering_plan ON offering_items (offering_id, plan_id);
+CREATE INDEX CONCURRENTLY licenses_customer_app ON licenses (customer_id, application_id)
+  WHERE status = 'active';</pre>
+<ul>
+  <li>Gate: міграція на проді, старий код працює, помилок у логах немає.</li>
+  <li>Відкат: <code>DROP</code> нових таблиць і колонок — їх ще ніхто не читає і не пише.</li>
+</ul>
+
+<h2>Крок 2. Dual-write — новий код пише в обидва місця</h2>
+<ul>
+  <li>Вмикається <b>до</b> backfill. Інакше offering чи ліцензія, створені між backfill і dual-write, лишаться без item.</li>
+  <li>Що пише новий код:
+    <ul>
+      <li>створення offering для одного застосунку — <code>offerings.plan_id</code> і рядок <code>offering_items</code>, в одній транзакції;</li>
+      <li>зміна ціни — і <code>price</code>, і <code>price_minor</code>;</li>
+      <li>видача ліцензії — <code>licenses.offering_item_id</code> і <code>application_id</code>;</li>
+      <li>trial / grace — у plan і в offering.</li>
+    </ul></li>
+  <li>Читаємо ще по-старому, з <code>plan_id</code>.</li>
+  <li>Деплой коду до вмикання флага: спершу всі інстанси вміють писати, потім флаг <code>catalog.write_items</code>.</li>
+  <li>Gate: флаг увімкнено на всіх інстансах; нові offerings і ліцензії за останню добу мають items (запит нижче).</li>
+  <li>Відкат: вимкнути флаг. Зайві items нікому не заважають.</li>
+</ul>
+<pre>-- нові ліцензії без item після вмикання флага — має бути 0
+SELECT count(*) FROM licenses l JOIN subscriptions s ON s.id = l.subscription_id
+WHERE l.offering_item_id IS NULL AND s.created_at > :flag_on_at;</pre>
+
+<h2>Крок 3. Backfill — старі дані в нові поля</h2>
+<ul>
+  <li>Скрипт ідемпотентний: <code>ON CONFLICT DO NOTHING</code> і <code>WHERE … IS NULL</code>. Можна зупинити й перезапустити.</li>
+  <li>Батчами по ~1000 рядків за <code>id</code>, кожен батч — окрема коротка транзакція, пауза між батчами. Без одного великого UPDATE.</li>
+  <li>Порядок важливий: спершу offerings і items, потім ліцензії (їм потрібен item).</li>
+</ul>
+
+<p class="t">3a. Offerings</p>
+<pre>UPDATE offerings o SET
+  price_minor = round(o.price * 10 ^ :currency_exponent),   -- USD 2, JPY 0
+  currency    = :currency,
+  kind        = 'single',
+  name        = p.name,
+  trial_days  = p.trial_period,
+  grace_days  = p.grace_period
+FROM plans p
+WHERE p.id = o.plan_id AND o.price_minor IS NULL AND o.id BETWEEN :from AND :to;</pre>
+<ul>
+  <li>Валюта: якщо ціни в різних валютах — брати з того місця, де вона зараз зберігається; експонента валюти з ISO 4217, не завжди 2.</li>
+  <li>Перевірка округлення: <code>price_minor / 10^exp = price</code> для кожного рядка, розбіжність → в окремий звіт, руками.</li>
+</ul>
+
+<p class="t">3b. Offering items — по одному на кожен offering</p>
+<pre>INSERT INTO offering_items (offering_id, item_type, plan_id, quantity, allocation_weight, code)
+SELECT o.id, 'plan', o.plan_id, 1, o.price_minor, o.code || ':plan'
+FROM offerings o
+WHERE o.plan_id IS NOT NULL AND o.id BETWEEN :from AND :to
+ON CONFLICT (offering_id, plan_id) DO NOTHING;</pre>
+<ul>
+  <li><code>allocation_weight</code> = уся ціна: item один.</li>
+</ul>
+
+<p class="t">3c. Licenses</p>
+<pre>UPDATE licenses l SET
+  offering_item_id = i.id,
+  application_id   = p.application_id
+FROM subscriptions s
+JOIN offering_items i ON i.offering_id = s.offering_id AND i.item_type = 'plan'
+JOIN plans p ON p.id = i.plan_id
+WHERE s.id = l.subscription_id AND l.offering_item_id IS NULL AND l.id BETWEEN :from AND :to;</pre>
+<ul>
+  <li><code>key</code>, <code>status</code>, <code>due_date</code> не чіпаємо — клієнт нічого не помічає.</li>
+  <li>Після backfill: <code>VALIDATE CONSTRAINT licenses_item_fk</code>, потім UNIQUE (<code>subscription_id</code>, <code>offering_item_id</code>) через <code>CREATE UNIQUE INDEX CONCURRENTLY</code> + <code>ADD CONSTRAINT … USING INDEX</code>.</li>
+  <li>NOT NULL на <code>offering_item_id</code> і <code>application_id</code>: <code>CHECK (… IS NOT NULL) NOT VALID</code> → <code>VALIDATE</code> → <code>SET NOT NULL</code> (Postgres 12+ бере перевірку з CHECK і не сканує таблицю).</li>
+</ul>
+
+<p class="t">3d. Credit accounts</p>
+<pre>INSERT INTO credit_accounts (customer_id) SELECT id FROM customers WHERE id BETWEEN :from AND :to
+ON CONFLICT (customer_id) DO NOTHING;</pre>
+<ul>
+  <li>Нові клієнти після цього отримують гаманець при реєстрації (той самий dual-write).</li>
+</ul>
+
+<p class="t">Gate кроку 3 — усі запити мають повернути 0</p>
+<pre>SELECT count(*) FROM offerings o WHERE o.plan_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM offering_items i WHERE i.offering_id = o.id);
+SELECT count(*) FROM offerings WHERE price_minor IS NULL;
+SELECT count(*) FROM licenses WHERE offering_item_id IS NULL OR application_id IS NULL;
+SELECT count(*) FROM licenses l JOIN offering_items i ON i.id = l.offering_item_id
+  JOIN subscriptions s ON s.id = l.subscription_id WHERE i.offering_id <> s.offering_id;
+SELECT count(*) FROM customers c WHERE NOT EXISTS (SELECT 1 FROM credit_accounts a WHERE a.customer_id = c.id);</pre>
+<ul>
+  <li>Відкат: нові поля ще ніхто не читає — можна обнулити й перезапустити.</li>
+</ul>
+
+<h2>Крок 4. Читання з нового за флагом</h2>
+<ul>
+  <li>Спершу <code>catalog.shadow_compare</code>: кожен запит читає обома шляхами, відповідає старим, розбіжність → лог з id і метрика.</li>
+  <li>Що порівнюємо:
+    <ul>
+      <li>перевірка доступу: старий шлях через subscription → offering → plan, новий — <code>licenses (customer_id, application_id)</code>;</li>
+      <li>вітрина: ціна і склад offering;</li>
+      <li>продовження: що видати по оплаті — один plan чи items;</li>
+      <li>trial / grace: з plan чи з offering.</li>
+    </ul></li>
+  <li>Потім <code>catalog.read_items</code>: 1–2 застосунки → 10% → усі. Тиждень на кожному рівні або менше, якщо розбіжностей 0.</li>
+  <li>Gate: флаг на всіх, 0 розбіжностей за тиждень.</li>
+  <li>Відкат: вимкнути <code>catalog.read_items</code>, dual-write продовжує тримати старі поля актуальними.</li>
+</ul>
+
+<p class="t">Коли вмикати бандли і кредити</p>
+<ul>
+  <li>Offering бандла має <code>plan_id = NULL</code>. Будь-який старий читач <code>plan_id</code> на ньому впаде або покаже порожнє.</li>
+  <li>Тому <code>sales.bundles</code> — лише після кроку 5 (усі читачі на items), або обмежено: бандл видно тільки на вітрині, яка вже читає items, і тільки для внутрішніх акаунтів.</li>
+  <li><code>sales.credit_packs</code> — коли Billing вміє <code>kind = one_time</code>.</li>
+  <li><code>credits.gateway</code> — окремо: 1–2 застосунки одного вендора, один провайдер → тиждень без розбіжностей <code>credit_lots.remaining</code> ≠ сума <code>credit_ledger.delta</code> → решта.</li>
+  <li>Старі версії застосунків без Gateway AI-функцій не бачать — нічого не ламається.</li>
+</ul>
+
+<h2>Крок 5. Inventory — хто ще читає старе</h2>
+<ul>
+  <li>Знайти всіх читачів <code>offerings.plan_id</code>, <code>offerings.price</code>, <code>plans.trial_period</code> / <code>grace_period</code>, <code>subscriptions.payment_ref</code> / <code>next_billing_at</code>:
+    <ul>
+      <li>пошук по коду всіх репозиторіїв;</li>
+      <li><code>pg_stat_statements</code>: запити, що згадують ці колонки, і з якої ролі БД;</li>
+      <li>BI: views, ETL, дашборди;</li>
+      <li>панелі вендорів, саппорт-тули, шаблони листів («ваша підписка на X продовжена»), експорти бухгалтерії.</li>
+    </ul></li>
+  <li>Кожен переходить на items. Для тих, кого не встигаємо переписати, — тимчасовий view <code>offering_primary_plan</code> (перший plan item), з датою видалення.</li>
+  <li>Окремий DB-юзер на кожного споживача, щоб у <code>pg_stat_statements</code> було видно, хто ще читає.</li>
+  <li>Gate: тиждень без жодного запиту до старих колонок, 0 розбіжностей.</li>
+</ul>
+
+<h2>Крок 6. Contract — видалення старого</h2>
+<ul>
+  <li>Перед кроком: бекап / знімок, вимкнути dual-write у коді (деплой), переконатися, що старі колонки ніхто не пише.</li>
+</ul>
+<pre>ALTER TABLE offerings DROP COLUMN plan_id, DROP COLUMN price;
+ALTER TABLE plans     DROP COLUMN trial_period, DROP COLUMN grace_period;
+-- Billing у своїй зоні: subscriptions.payment_ref, subscriptions.next_billing_at
+ALTER TABLE offerings ALTER COLUMN price_minor SET NOT NULL, ALTER COLUMN kind SET NOT NULL,
+  ADD CONSTRAINT offerings_kind_chk CHECK (kind IN ('single','bundle','credit_pack')) NOT VALID;
+DROP INDEX offering_items_offering_plan;   -- або лишити як бізнес-правило</pre>
+<ul>
+  <li>Назад уже ніяк — тому gate стоїть перед кроком, а не після.</li>
+  <li>Видалені поля відновлюються лише з бекапу.</li>
+</ul>
+
+<h2>Чинні клієнти — що з ними відбувається</h2>
+<ul>
+  <li>Активна підписка: продовжується по тому самому offering; Billing надсилає PaymentSucceeded, License по <code>UK (subscription_id, offering_item_id)</code> лише подовжує <code>due_date</code> існуючої ліцензії.</li>
+  <li>Підписка в trial: <code>trial_days</code> скопійовано з plan — trial закінчується тоді ж, коли й був би.</li>
+  <li>Підписка в grace / <code>past_due</code>: поведінка та сама, <code>grace_days</code> з plan.</li>
+  <li>Скасована, але оплачена до кінця періоду: ліцензія живе до <code>due_date</code>, як і раніше.</li>
+  <li>Рефанд поточного періоду після міграції: потрібен рядок <code>payments</code> за цей період — його створює Billing у своїй міграції.</li>
+  <li>Ключі ліцензій і десктоп-клієнти: нічого не змінюється, перевипуску немає.</li>
+  <li>Перехід з одиночної підписки на бандл: спершу видати права бандла, потім закрити стару підписку з прорейтом — доступ не переривається. Дві ліцензії на той самий застосунок на мить — нормально, доступ є, поки активна хоч одна.</li>
+</ul>
+
+<h2>Що може піти не так</h2>
+<ul>
+  <li>Offering без plan у старих даних (битий рядок) — backfill пропускає, gate 3 показує, руками.</li>
+  <li>Ліцензія, чия підписка посилається на видалений offering — те саме, звіт і руками.</li>
+  <li>Округлення ціни при переході з decimal — звіт розбіжностей у 3a, жодного автоматичного округлення без перевірки.</li>
+  <li>Довга транзакція тримає lock під час DDL — <code>lock_timeout</code> і повтор.</li>
+  <li>Backfill навантажує репліки — батчі з паузою, стежимо за replication lag.</li>
+  <li>Новий запис, що проскочив між backfill і dual-write — неможливий, бо dual-write вмикається раніше; про всяк випадок gate 3 після повторного прогону backfill.</li>
+  <li>BI, що читає <code>plan_id</code> і не знайдений на кроці 5, — зламається на Contract. Захист: тиждень тиші в <code>pg_stat_statements</code>.</li>
+</ul>
+
+<h2>Моніторинг на час міграції</h2>
+<ul>
+  <li>Прогрес backfill: скільки рядків без item / без <code>price_minor</code> лишилось.</li>
+  <li>Розбіжності shadow compare: кількість і приклади id.</li>
+  <li>Помилки перевірки доступу (403 на клієнтів, які мали доступ) — головний сигнал, що щось не так.</li>
+  <li>Платіж без виданих прав &gt; 5 хв — page.</li>
+  <li>Replication lag під час backfill.</li>
+  <li>Після вмикання кредитів: <code>credit_lots.remaining</code> ≠ сума <code>credit_ledger.delta</code> — page.</li>
+</ul>
+
+</main>
+{{template "foot" .}}{{end}}

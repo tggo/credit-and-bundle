@@ -1,0 +1,29 @@
+@startuml
+!include skin.iuml
+skinparam defaultFontSize 15
+hide footbox
+participant "Billing\n(Billing team)" as B
+participant "Grant handler\n(ours)" as G
+participant "License" as L
+participant "Credits" as C
+
+B -> G : PaymentSucceeded (payment_id, subscription_id, offering_id, period)
+group one transaction — License and Credits share one Postgres
+  loop each offering item (from Catalog)
+    alt plan item
+      G -> L : upsert license — UK (subscription_id, offering_item_id)\nrenewal → only due_date moves
+    else credit package item
+      G -> C : insert lot — UK (payment_id, offering_item_id)\n+ lot_scope_apps + ledger "grant"
+    end
+  end
+end
+G --> B : ack
+
+B -> G : PaymentRefunded (payment_id)
+group one transaction
+  G -> L : licenses of this payment end with the last still-paid period
+  G -> C : every lot of the payment: remaining → 0, revoked_at = now\n**also lots already at 0** + ledger "revoke"
+end
+note over G, C : a charge still running may return credits to such a lot later:\nrevoked_at is set → they are burned at once, the refunded payment gives nothing back
+note over B, C : at-least-once: a duplicate event hits both UKs → nothing granted twice
+@enduml

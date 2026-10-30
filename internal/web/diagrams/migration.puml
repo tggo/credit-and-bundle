@@ -1,0 +1,23 @@
+@startuml
+!include skin.iuml
+skinparam defaultFontSize 13
+skinparam rectangleBorderColor #91a7ff
+skinparam rectangleBackgroundColor #f8f9ff
+left to right direction
+rectangle "**1. Expand**\n----\n+ offering_items, credit_packages,\naction_prices, Credits tables\n+ nullable columns\noffering.plan_id stays\n----\nrollback: drop new tables" as E
+rectangle "**2. Dual-write**\n----\nnew code writes\nplan_id AND items\nreads: plan_id\n----\nrollback: flag off" as D
+rectangle "**3. Backfill**\n----\nevery offering → 1 item(plan)\ntrial/grace → offering\nprice → price_minor\nlicense.offering_item_id\n----\nidempotent, batches\n----\nrollback: nothing reads it" as B
+rectangle "**4. Read items**\n----\nshadow compare first\nflag: 1–2 apps → all\n----\nmismatch → log + alert\n----\nrollback: flag off" as R
+rectangle "**5. Inventory**\n----\nwho reads plan_id:\nBI, vendor panels,\nsupport, emails\n→ move to items" as I
+rectangle "**6. Contract**\n----\ndrop offering.plan_id,\nprice, plan trial/grace\n----\nno way back" as C
+E --> D : tables live
+D --> B : flag on\neverywhere
+B --> R : 0 rows\nwithout item
+R --> I : flag on for all,\n0 mismatches
+I --> C : a week, no\nplan_id readers
+note bottom of R #fff4d6
+  Existing subscriptions and license keys never change.
+  Bundles on sale only after step 5 (bundle offering has no plan_id).
+  Credits: separate flag, 1–2 apps first.
+end note
+@enduml

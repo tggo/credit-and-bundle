@@ -1,0 +1,38 @@
+# credit-and-bundle.ihatebot.com — Credits & Bundles MVP (/opt/credit-and-bundle).
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bc
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: bundlecredit
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bc -d bundlecredit"]
+      interval: 3s
+      retries: 20
+    mem_limit: 512m
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://bc:${PG_PASSWORD}@db:5432/bundlecredit?sslmode=disable&timezone=UTC
+      ADDR: ":8095"
+      RESET_PASSWORD: ${RESET_PASSWORD}
+      PLANTUML_URL: http://plantuml:8080
+      KEEP_DATA: "1"   # restarts keep the simulator state; the in-app reset button still wipes it
+    ports:
+      - "127.0.0.1:18094:8095"
+    read_only: true
+    mem_limit: 256m
+  plantuml:
+    image: plantuml/plantuml-server:jetty-v1.2026.9
+    restart: unless-stopped
+    mem_limit: 512m
+volumes:
+  pgdata:

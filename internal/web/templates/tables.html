@@ -1,0 +1,342 @@
+{{define "tables"}}{{template "head" .}}
+<main class="doc">
+
+<h1>Credits &amp; Bundles — таблиці</h1>
+
+<ul>
+  <li>На Board таблиці в однині (CREDIT_LOT), у Postgres у множині (<code>credit_lots</code>) — це ті самі таблиці.</li>
+  <li>Гроші — <code>*_minor</code>: цілі центи, <code>bigint</code> (<code>3000</code> = $30.00).</li>
+  <li><code>UK①</code> на Board — один унікальний ключ на два поля.</li>
+</ul>
+
+<pre>offerings 1─N offering_items ─┬─ plan_id → plans → applications   ⇒ licenses
+                              └─ credit_package_id → credit_packages ⇒ credit_lots
+customers 1─N subscriptions 1─N payments
+customers 1─1 credit_accounts 1─N credit_lots 1─N lot_scope_apps N─1 applications
+credit_accounts 1─N credit_charges 1─N credit_ledger N─1 credit_lots
+action_prices ┄ ціна копіюється ┄▶ credit_charges.amount</pre>
+
+<h2>Catalog</h2>
+
+<p class="t"><code>applications</code>: застосунок вендора</p>
+<ul>
+  <li><code>applications.code</code> UNIQUE, <code>applications.name</code>.</li>
+  <li><code>applications.vendor</code> — текст, не FK: таблиці вендорів немає.</li>
+  <li>Від поточної моделі не змінилась.</li>
+</ul>
+
+<p class="t"><code>plans</code>: що дає застосунок</p>
+<ul>
+  <li><code>plans.application_id</code> → <code>applications.id</code>. Застосунок 1 : N планів.</li>
+  <li><code>plans.slot_count</code>: скільки пристроїв. <code>plans.licensing_model</code>: <code>per_device</code> або <code>per_user</code>.</li>
+  <li>Період, trial і grace з plan прибрали — вони в <code>offerings</code>.</li>
+  <li>Plan не міняє застосунок: інший застосунок — інший plan.</li>
+</ul>
+
+<p class="t"><code>credit_packages</code>: пакет кредитів</p>
+<ul>
+  <li><code>credit_packages.credits</code>: скільки кредитів, CHECK &gt; 0.</li>
+  <li><code>credit_packages.validity_days</code>: строк для разового пакета.</li>
+  <li><code>credit_packages.application_id</code>:
+    <ul>
+      <li>заповнено — in-app пакет, кредити лише в цьому застосунку;</li>
+      <li>NULL — на всю платформу або на застосунки бандла, в якому лежить.</li>
+    </ul></li>
+</ul>
+
+<p class="t"><code>offerings</code>: вітрина, те, що купує клієнт</p>
+<ul>
+  <li><code>offerings.price_minor</code>, <code>offerings.currency</code>: ціна.</li>
+  <li><code>offerings.billing_period</code>: <code>month</code> або <code>one_time</code>.</li>
+  <li><code>offerings.trial_days</code>, <code>offerings.grace_days</code>.</li>
+  <li><code>offerings.kind</code>: <code>single</code>, <code>bundle</code> або <code>credit_pack</code> — лише для вітрини, логіка однакова.</li>
+  <li><code>offerings.plan_id</code> прибрали: склад тепер в <code>offering_items</code>.</li>
+  <li>Ціна тут, а не в plan, бо той самий plan продається за різною ціною, з акцією, окремо і в бандлі.</li>
+</ul>
+
+<p class="t"><code>offering_items</code>: склад offering</p>
+<ul>
+  <li><code>offering_items.offering_id</code> → <code>offerings.id</code>. Offering 1 : N items.</li>
+  <li>Рівно одне з двох, CHECK:
+    <ul>
+      <li><code>offering_items.plan_id</code> → <code>plans.id</code>;</li>
+      <li><code>offering_items.credit_package_id</code> → <code>credit_packages.id</code>.</li>
+    </ul></li>
+  <li><code>offering_items.allocation_weight</code>: частка ціни offering, у центах. З неї рахуємо частковий рефанд і розподіл між вендорами.</li>
+  <li><code>offering_items.quantity</code>: у MVP завжди 1.</li>
+  <li>Приклади:
+    <ul>
+      <li>Design+ = 1 offering, 4 items: 3 plans + 1 credit_package на 10 000;</li>
+      <li>App Shop monthly = 1 offering, 1 item (plan);</li>
+      <li>Credit pack 500 = 1 offering, 1 item (credit_package).</li>
+    </ul></li>
+  <li>Вітрина: ціна з <code>offerings</code>, склад — <code>offering_items</code> → <code>plans</code> → <code>applications</code> і <code>offering_items</code> → <code>credit_packages.credits</code>.</li>
+</ul>
+
+<p class="t"><code>action_prices</code>: ціна AI-дії</p>
+<ul>
+  <li>PK (<code>application_id</code>, <code>action_code</code>, <code>valid_from</code>).</li>
+  <li><code>action_prices.application_id</code> → <code>applications.id</code>.</li>
+  <li><code>action_prices.action_code</code>: <code>ai.generate</code>, <code>ai.retouch</code>, <code>ai.bg_remove</code>.</li>
+  <li><code>action_prices.credits</code>: ціна в кредитах.</li>
+  <li>Нова ціна — новий рядок з новим <code>valid_from</code>, старий не міняємо.</li>
+  <li>З <code>credit_charges</code> FK немає, навмисно:
+    <ul>
+      <li>при списанні беремо рядок з найсвіжішим <code>valid_from</code> ≤ зараз і копіюємо <code>action_prices.credits</code> у <code>credit_charges.amount</code>;</li>
+      <li>зміна ціни не переписує історію списань;</li>
+      <li>на Board — анімована лінія «price copied at charge time», фільтр async.</li>
+    </ul></li>
+</ul>
+
+<h2>Customer</h2>
+
+<p class="t"><code>customers</code></p>
+<ul>
+  <li><code>customers.email</code> UNIQUE, <code>customers.handle</code> UNIQUE, <code>customers.name</code>.</li>
+  <li>1 : N <code>subscriptions</code>, 1 : N <code>licenses</code>, 1 : 1 <code>credit_accounts</code>.</li>
+</ul>
+
+<h2>Billing — команда Billing, у MVP симульовано</h2>
+
+<p class="t"><code>subscriptions</code>: що клієнт купив</p>
+<ul>
+  <li><code>subscriptions.customer_id</code> → <code>customers.id</code>.</li>
+  <li><code>subscriptions.offering_id</code> → <code>offerings.id</code>: підписка на offering, не на plan.</li>
+  <li><code>subscriptions.provider_sub_ref</code> UNIQUE: id у провайдера, вебхуки шукають за ним.</li>
+  <li><code>subscriptions.kind</code>:
+    <ul>
+      <li><code>recurring</code>: продовжується щоперіоду;</li>
+      <li><code>one_time</code>: пакет кредитів, один платіж.</li>
+    </ul></li>
+  <li><code>subscriptions.status</code>: <code>created</code> → <code>active</code> → <code>past_due</code> → <code>canceled</code>.</li>
+  <li><code>subscriptions.current_period_start</code> / <code>current_period_end</code>: поточний оплачений період.</li>
+  <li>Рядок з'являється на checkout, стає <code>active</code> по першій оплаті.</li>
+  <li>Grace period у MVP немає — техборг.</li>
+</ul>
+
+<p class="t"><code>payments</code>: оплата одного періоду</p>
+<ul>
+  <li><code>payments.subscription_id</code> → <code>subscriptions.id</code>. Підписка 1 : N платежів, по одному на період.</li>
+  <li><code>payments.payment_ref</code> UNIQUE: id у провайдера. Дубль вебхука знаходить рядок і нічого не видає.</li>
+  <li><code>payments.amount_minor</code>, <code>payments.currency</code>.</li>
+  <li><code>payments.period_start</code> / <code>period_end</code>: який період оплачено.</li>
+  <li><code>payments.status</code>:
+    <ul>
+      <li><code>succeeded</code>: оплачено, права видано;</li>
+      <li><code>refunded</code>: повернули, сума в <code>payments.refunded_minor</code>; рядки <code>credit_lots</code> цього платежу відкликаються;</li>
+      <li><code>charged_back</code>: банк забрав гроші; за дизайном відкликаємо lots і блокуємо <code>credit_accounts</code>, у MVP не реалізовано.</li>
+    </ul></li>
+  <li>Рядок з'являється на кожну оплату: першу і кожне продовження. Від нього йде подія PaymentSucceeded.</li>
+</ul>
+
+<p class="t"><code>webhook_events</code>, <code>provider_txns</code>: лише симуляція</p>
+<ul>
+  <li><code>webhook_events</code>: вхідні вебхуки, PK <code>event_id</code> — дедуплікація.</li>
+  <li><code>webhook_events.status</code>: <code>applied</code>, <code>duplicate</code>, <code>parked</code> (підписка ще невідома), <code>rejected</code>.</li>
+  <li><code>provider_txns</code>: записи «провайдера» для звірки, по кожному платежу.</li>
+</ul>
+
+<h2>License</h2>
+
+<p class="t"><code>licenses</code>: право на застосунок</p>
+<ul>
+  <li><code>licenses.subscription_id</code> → <code>subscriptions.id</code>.</li>
+  <li><code>licenses.offering_item_id</code> → <code>offering_items.id</code> — нове. Бандл дає N ліцензій, по одній на item з plan.</li>
+  <li>UNIQUE (<code>subscription_id</code>, <code>offering_item_id</code>), <code>UK①</code>: одна ліцензія на застосунок у підписці.</li>
+  <li><code>licenses.customer_id</code> → <code>customers.id</code> і <code>licenses.application_id</code> → <code>applications.id</code>:
+    <ul>
+      <li>денормалізація, навмисно: можна вивести через subscription і item → plan;</li>
+      <li>перевірка «чи є в клієнта доступ до застосунку» йде на кожен запуск і кожну AI-дію — License відповідає сам, без join у Catalog;</li>
+      <li>індекс (<code>customer_id</code>, <code>application_id</code>) WHERE <code>status = 'active'</code>.</li>
+    </ul></li>
+  <li><code>licenses.key</code> UNIQUE: ключ ліцензії, при міграції не змінюється.</li>
+  <li><code>licenses.status</code>: <code>active</code> або <code>revoked</code>. <code>licenses.due_date</code>: до коли діє.</li>
+  <li>Той самий застосунок окремо і в бандлі — дві ліцензії; доступ є, поки активна хоч одна.</li>
+  <li>Коли рядки з'являються:
+    <ul>
+      <li>перша оплата — insert на кожен item з <code>plan_id</code>;</li>
+      <li>продовження — той самий insert упирається в <code>UK①</code> і оновлює <code>due_date</code>;</li>
+      <li>рефанд — <code>due_date</code> обрізається до кінця раніше оплаченого періоду, якщо він є.</li>
+    </ul></li>
+</ul>
+
+<h2>Credits</h2>
+
+<p class="t"><code>credit_accounts</code>: гаманець клієнта</p>
+<ul>
+  <li>Один рядок на клієнта: <code>credit_accounts.customer_id</code> UNIQUE → <code>customers.id</code>.</li>
+  <li><code>credit_accounts.status</code>: <code>active</code> або <code>blocked</code>.</li>
+  <li>Балансу тут немає. Баланс — сума <code>credit_lots.remaining</code> по рядках цього гаманця, які ще не згоріли.</li>
+  <li>Таблиця потрібна з двох причин:
+    <ul>
+      <li>один рядок, який блокуємо під час списання;</li>
+      <li><code>status = blocked</code> при chargeback.</li>
+    </ul></li>
+  <li>Рядок створюється разом із клієнтом (у MVP — у сидах).</li>
+</ul>
+
+<p class="t"><code>credit_lots</code>: кредити одного платежу</p>
+<ul>
+  <li>Рядок створюється по PaymentSucceeded, у тій самій транзакції, що й рядки <code>licenses</code>. Один рядок на кожен рядок <code>offering_items</code> з <code>credit_package_id</code>.</li>
+  <li><code>credit_lots.account_id</code> → <code>credit_accounts.id</code>: чий гаманець.</li>
+  <li><code>credit_lots.source_type</code>: звідки кредити:
+    <ul>
+      <li><code>bundle</code>: прийшли з бандлом;</li>
+      <li><code>subscription</code>: місячні кредити одиночної підписки;</li>
+      <li><code>pack</code>: куплений пакет;</li>
+      <li><code>promo</code>: подаровані.</li>
+    </ul></li>
+  <li><code>credit_lots.payment_id</code> → <code>payments.id</code>, <code>credit_lots.offering_item_id</code> → <code>offering_items.id</code>, <code>credit_lots.subscription_id</code> → <code>subscriptions.id</code>: з якого платежу і item створено рядок.
+    <ul>
+      <li>UNIQUE (<code>payment_id</code>, <code>offering_item_id</code>), <code>UK①</code>: Billing може надіслати подію двічі, другий insert нічого не видасть.</li>
+      <li>При рефанді за <code>credit_lots.payment_id</code> знаходимо рядки, які треба відкликати.</li>
+    </ul></li>
+  <li><code>credit_lots.label</code>: що клієнт бачить у розбивці, напр. «Design+ · Oct 26».</li>
+  <li><code>credit_lots.scope</code>:
+    <ul>
+      <li><code>platform</code>: можна витрачати будь-де;</li>
+      <li><code>bundle</code>: лише в застосунках із <code>lot_scope_apps</code>.</li>
+    </ul></li>
+  <li><code>credit_lots.kind</code>: <code>paid</code> або <code>bonus</code>. Bonus витрачається першим і грошима не повертається.</li>
+  <li><code>credit_lots.granted</code>: скільки видали, з <code>credit_packages.credits</code>.</li>
+  <li><code>credit_lots.remaining</code>: скільки лишилось, CHECK <code>remaining &gt;= 0</code>. При створенні <code>remaining = granted</code>.</li>
+  <li><code>credit_lots.expires_at</code>: коли згорить. Для підписки — кінець оплаченого періоду, для разового пакета — дата покупки плюс <code>credit_packages.validity_days</code>.</li>
+  <li><code>credit_lots.revoked_at</code>: коли платіж, що видав рядок, повернули. Ставиться всім рядкам цього платежу, навіть тим, де вже 0: якщо charge, що ще йде, потім поверне кредити, вони одразу згорають.</li>
+  <li>Порядок списання, коли рядків кілька: <code>bundle</code> → <code>bonus</code> → ті, що згорять раніше.</li>
+  <li>Що змінює рядок:
+    <ul>
+      <li>списання і повернення — <code>remaining</code>, кожна зміна дублюється рядком у <code>credit_ledger</code>;</li>
+      <li>продовження — новий платіж, отже новий рядок; старий згорає;</li>
+      <li>минув <code>expires_at</code> — <code>remaining</code> → 0, <code>credit_ledger.type = expire</code>;</li>
+      <li>рефанд платежу — <code>remaining</code> → 0, <code>revoked_at</code> = зараз, <code>credit_ledger.type = revoke</code>.</li>
+    </ul></li>
+</ul>
+
+<p class="t"><code>lot_scope_apps</code>: де можна витратити рядок <code>credit_lots</code></p>
+<ul>
+  <li>Окремого гаманця на кожен застосунок немає. Гаманець один (<code>credit_accounts</code>), а <code>lot_scope_apps</code> каже, в яких застосунках можна витрачати конкретний рядок <code>credit_lots</code>.</li>
+  <li>Зв'язки: <code>lot_scope_apps.lot_id</code> → <code>credit_lots.id</code>, <code>lot_scope_apps.application_id</code> → <code>applications.id</code>, PK (<code>lot_id</code>, <code>application_id</code>).</li>
+  <li>Рядок <code>credit_lots</code> бандла Design+ має три рядки тут: App Shop, Face Retouch, Notes AI. In-app пакет має один рядок.</li>
+  <li>Якщо <code>credit_lots.scope = platform</code>, рядків немає.</li>
+  <li>Вставляються в тій самій транзакції, що й рядок <code>credit_lots</code>, потім не змінюються.</li>
+  <li>Окрема таблиця, а не масив, щоб на <code>application_id</code> був FK.</li>
+</ul>
+
+<p class="t"><code>credit_charges</code>: одна AI-дія клієнта</p>
+<ul>
+  <li><code>credit_charges.account_id</code> → <code>credit_accounts.id</code>.</li>
+  <li><code>credit_charges.application_id</code> → <code>applications.id</code>: який застосунок списав.</li>
+  <li><code>credit_charges.action_code</code>: що зроблено. Пара (<code>application_id</code>, <code>action_code</code>) визначає ціну в <code>action_prices</code>.</li>
+  <li><code>credit_charges.amount</code>: ціна дії в кредитах, копія <code>action_prices.credits</code>, цілі кредити.
+    <ul>
+      <li>Якщо знадобиться 0.9 кредиту — 1 кредит = 100 одиниць, <code>amount = 90</code>, клієнту показуємо округлене.</li>
+    </ul></li>
+  <li><code>credit_charges.idempotency_key</code>: застосунок генерує на одну дію користувача і передає той самий при повторі. UNIQUE (<code>account_id</code>, <code>idempotency_key</code>), <code>UK①</code>.</li>
+  <li><code>credit_charges.request_hash</code>: хеш застосунку, дії та input.
+    <ul>
+      <li>той самий ключ і той самий хеш — повтор, віддаємо збережений <code>credit_charges.result</code>;</li>
+      <li>той самий ключ з іншим хешем — помилка клієнта: 422, нічого не списуємо.</li>
+    </ul></li>
+  <li><code>credit_charges.result</code>: відповідь AI, щоб повтор отримав те саме, а ми не платили провайдеру вдруге.</li>
+  <li><code>credit_charges.cost_minor</code>: скільки виклик коштував нам у провайдера, у центах. Лише для звітів про маржу. У MVP — заглушка: половина ціни в credits.</li>
+  <li><code>credit_charges.status</code>: <code>in_progress</code> → <code>completed</code> або <code>refunded</code>.</li>
+  <li>Рядок з'являється, коли AI Gateway викликає списання. При 402 рядок не зберігається.</li>
+  <li>Status змінюється лише <code>WHERE status = 'in_progress'</code>, тому повернення буває рівно одне.</li>
+</ul>
+
+<p class="t"><code>credit_ledger</code>: журнал руху кредитів</p>
+<ul>
+  <li>Тільки insert, без update і delete.</li>
+  <li>Зв'язки: <code>credit_ledger.lot_id</code> → <code>credit_lots.id</code>, <code>credit_ledger.charge_id</code> → <code>credit_charges.id</code> (NULL, якщо рух не від списання), <code>credit_ledger.account_id</code> → <code>credit_accounts.id</code>.</li>
+  <li><code>credit_ledger.type</code>: <code>grant</code>, <code>charge</code>, <code>refund</code>, <code>expire</code>, <code>revoke</code>.</li>
+  <li><code>credit_ledger.delta</code>: зміна зі знаком. <code>credit_ledger.note</code>: чому.</li>
+</ul>
+
+<p class="t"><code>credit_charges</code> і <code>credit_ledger</code>: у чому різниця</p>
+<ul>
+  <li><code>credit_charges</code> — операція. Один рядок на дію клієнта, зі статусом, ключем і результатом.</li>
+  <li><code>credit_ledger</code> — рух кредитів по конкретних рядках <code>credit_lots</code>.</li>
+  <li>Один рядок <code>credit_charges</code> на 80 кредитів може зняти 50 з рядка <code>credit_lots</code> бандла і 30 з рядка пакета. Тоді в <code>credit_ledger</code> два рядки, <code>type = charge</code>, <code>delta</code> −50 і −30, з тим самим <code>charge_id</code>.</li>
+  <li>Провайдер упав — два рядки <code>type = refund</code> (+50 і +30) на ті самі <code>lot_id</code>, а <code>credit_charges.status</code> стає <code>refunded</code>.</li>
+  <li>Рухи без <code>charge_id</code>: <code>grant</code>, <code>expire</code>, <code>revoke</code>.</li>
+  <li>Інваріант: <code>credit_lots.remaining</code> = сума <code>credit_ledger.delta</code> з тим самим <code>lot_id</code>. Перевіряють тести, на розбіжність стоїть алерт.</li>
+</ul>
+
+<h2>Транзакції</h2>
+
+<p class="t">Видача прав — PaymentSucceeded</p>
+<ol type="a">
+  <li>BEGIN.</li>
+  <li>На кожен рядок <code>offering_items</code> з <code>plan_id</code>: insert у <code>licenses</code>; є <code>UK①</code> — оновити <code>due_date</code>.</li>
+  <li>На кожен рядок <code>offering_items</code> з <code>credit_package_id</code>: insert у <code>credit_lots</code>; є <code>UK①</code> — нічого не робити.</li>
+  <li>Insert у <code>lot_scope_apps</code>: застосунки бандла або in-app застосунок.</li>
+  <li>Insert у <code>credit_ledger</code>, <code>type = grant</code>, <code>delta = +granted</code>.</li>
+  <li>COMMIT.</li>
+</ol>
+<ul>
+  <li>Або клієнт отримав і ліцензії, і кредити, або нічого.</li>
+  <li>Повтор події нічого не дублює завдяки двом <code>UK①</code>.</li>
+</ul>
+
+<p class="t">Lock і транзакція при списанні</p>
+<ul>
+  <li>Блокування живе тільки всередині транзакції. <code>SELECT … FROM credit_accounts … FOR UPDATE</code> тримає рядок до COMMIT або ROLLBACK.</li>
+  <li>До транзакції, без lock:
+    <ul>
+      <li><code>credit_accounts.status = blocked</code> → 403;</li>
+      <li>ключ уже є в <code>credit_charges</code> → replay: 200 зі збереженим result, 409 якщо ще <code>in_progress</code>, 422 якщо інший хеш. Це йде до перевірки ліцензії: дія вже оплачена, навіть якщо бандл потім повернули;</li>
+      <li>немає активного рядка <code>licenses</code> → 403;</li>
+      <li>ціна з <code>action_prices</code>, немає → 404.</li>
+    </ul></li>
+  <li>Одна транзакція:
+    <ol type="a">
+      <li>BEGIN.</li>
+      <li>Lock рядка в <code>credit_accounts</code>.</li>
+      <li>Insert у <code>credit_charges</code>, <code>status = in_progress</code>. Ключ уже є (копія чекала на lock) → ROLLBACK, replay.</li>
+      <li>Зменшити <code>credit_lots.remaining</code>.</li>
+      <li>Insert у <code>credit_ledger</code>, <code>type = charge</code>.</li>
+      <li>Не вистачило → ROLLBACK, 402. Вистачило → COMMIT.</li>
+    </ol></li>
+  <li>Другий запит того ж клієнта чекає на lock того самого рядка <code>credit_accounts</code> і після COMMIT бачить новий <code>credit_lots.remaining</code>. Двох списань з одного залишку не буде.</li>
+  <li>Lock гаманця завжди перший: навпаки — deadlock, бо FK з <code>credit_charges.account_id</code> бере key-share lock на той самий рядок.</li>
+  <li>Провайдера AI кличемо після COMMIT, щоб не тримати lock, поки він відповідає.
+    <ul>
+      <li>успіх → <code>credit_charges.status = completed</code>, записати <code>result</code> і <code>cost_minor</code>;</li>
+      <li>5xx або таймаут → повернення.</li>
+    </ul></li>
+</ul>
+
+<p class="t">Повернення — провайдер упав або sweeper</p>
+<ol type="a">
+  <li>BEGIN.</li>
+  <li><code>credit_charges.status</code> → <code>refunded</code> WHERE <code>status = in_progress</code>. 0 рядків — уже оброблено, вихід.</li>
+  <li>На кожен рядок <code>credit_ledger</code> цього <code>charge_id</code>: <code>credit_lots.remaining</code> + n, insert у <code>credit_ledger</code> <code>type = refund</code>.</li>
+  <li>Рядок <code>credit_lots</code> уже прострочений → одразу <code>type = expire</code>.</li>
+  <li>COMMIT.</li>
+</ol>
+<ul>
+  <li>Sweeper на кожному інстансі раз на 15 с шукає <code>credit_charges</code> в <code>in_progress</code> старші 2 хв.</li>
+  <li>Кілька sweeper-ів не повернуть двічі: статус змінює лише перший.</li>
+</ul>
+
+<p class="t">Рефанд бандла — PaymentRefunded</p>
+<ol type="a">
+  <li>BEGIN.</li>
+  <li><code>payments.status = refunded</code>, <code>payments.refunded_minor</code> = сума.</li>
+  <li>Рядки <code>credit_lots</code> з цим <code>payment_id</code>: <code>remaining</code> → 0, <code>revoked_at</code> = зараз, <code>credit_ledger.type = revoke</code> (якщо було що забрати).</li>
+  <li>Рядки <code>licenses</code> підписки: <code>due_date</code> → кінець раніше оплаченого періоду, якщо він є; інакше <code>revoked</code>.</li>
+  <li>COMMIT.</li>
+</ol>
+<ul>
+  <li>Сума: застосунки за невикористаний час + кредити за невитрачену частку, обидва від <code>offering_items.allocation_weight</code>.</li>
+  <li>Рефанду за один застосунок бандла немає.</li>
+</ul>
+
+<p class="t">Згоряння</p>
+<ul>
+  <li>Рядки <code>credit_lots</code>, де <code>expires_at</code> ≤ зараз і <code>remaining</code> &gt; 0: <code>remaining</code> → 0, <code>credit_ledger.type = expire</code>.</li>
+  <li>У цей момент борг перед клієнтом стає доходом.</li>
+</ul>
+
+</main>
+{{template "foot" .}}{{end}}

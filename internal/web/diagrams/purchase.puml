@@ -1,0 +1,66 @@
+@startuml
+!include skin.iuml
+hide footbox
+autonumber
+actor "Customer" as U
+participant "Store\n(site)" as S
+participant "Catalog" as CAT
+participant "Billing" as B
+participant "Payment\nprovider" as P
+participant "Grant handler\n(ours)" as GH
+participant "License" as L
+participant "Credits" as C
+participant "Vendor app" as APP
+participant "AI Gateway" as G
+participant "AI provider" as AI
+
+== Choose ==
+U -> S : open Design+
+S -> CAT : offering(code)
+CAT --> S : offering + items:\nplan App Shop, plan Face Retouch,\nplan Notes AI, credits 10 000;\nprice, period, share of price per item
+S --> U : 3 apps + 10 000 credits / month
+
+== Pay ==
+U -> B : checkout(offering_id)
+B -> P : create subscription
+P --> U : payment form
+U -> P : pay
+P -> B : webhook invoice.paid\n(dedup by event_id and payment_ref)
+B -> B : subscription active,\npayment row
+B -> GH : PaymentSucceeded {payment_id, subscription_id,\noffering_id, customer_id, period}
+
+== Grant: one transaction ==
+GH -> CAT : items of offering
+CAT --> GH : 3 plan items + 1 credit item
+group one Postgres tx (License and Credits share the DB)
+  GH -> L : upsert license per plan item\nUK (subscription_id, offering_item_id),\napplication_id copied, due_date = period end
+  GH -> C : insert credit lot\nUK (payment_id, offering_item_id),\nscope = bundle apps, expires = period end
+  C -> C : ledger: grant +10 000
+end
+note right of GH : duplicate event → UK conflict,\nnothing granted twice
+
+== Use ==
+U -> APP : launch App Shop
+APP -> L : active license (customer, App Shop)?
+L --> APP : yes, slots
+APP -> G : balance?
+G -> C : GET balance(application_id)
+C --> G : available here 10 000, total 10 000
+U -> APP : AI action
+APP -> G : POST charge, Idempotency-Key
+G -> C : charge(app, ai.generate, key)
+C -> L : license active?
+C -> CAT : price of ai.generate
+C -> C : tx: lock wallet, charge in_progress,\ndebit lots, ledger
+C --> G : charge_id, 80 debited
+G -> AI : request (max_tokens)
+AI --> G : result
+G -> C : Complete(charge_id)
+G --> APP : 201 result, available 9 920
+
+== Next period ==
+P -> B : invoice.paid (renewal)
+B -> GH : PaymentSucceeded (new payment_id)
+GH -> L : due_date moved
+GH -> C : new lot; old lot expires at its date
+@enduml

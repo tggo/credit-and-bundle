@@ -1,0 +1,125 @@
+{{define "sim"}}{{template "head" .}}
+<main class="grid3">
+  <section>
+    <h2>Catalog</h2>
+    <div class="catalog-scroll">
+    {{range .Offerings}}
+    <div class="offer">
+      <div><b>{{.Name}}</b> <span class="badge {{.Kind}}">{{.Kind}}</span></div>
+      <div class="muted">{{money .Price}} / {{.Period}}</div>
+      <div class="small">{{range index $.Contents .ID}}<span class="chip">{{.}}</span>{{end}}</div>
+      <button hx-post="/sim/buy" hx-vals='{"c":"{{$.Customer}}","o":"{{.ID}}"}' hx-swap="none">Buy as {{$.Customer}}</button>
+    </div>
+    {{end}}
+    </div>
+
+    <h2>Failure switches</h2>
+    <div class="btns">
+      <button hx-post="/sim/flag" hx-vals='{"f":"fail"}' hx-swap="none">Next AI call → provider 5xx</button>
+      <button hx-post="/sim/flag" hx-vals='{"f":"block"}' hx-swap="none">Next AI call → content block</button>
+      <button hx-post="/sim/flag" hx-vals='{"f":"crash"}' hx-swap="none">Next AI call → process dies after debit</button>
+      <button hx-post="/sim/flag" hx-vals='{"f":"lose"}' hx-swap="none">Lose next invoice.paid</button>
+    </div>
+
+    <h2>Try this</h2>
+    <ol class="howto">
+      <li>Buy <b>Design+ bundle</b> and <b>Credit pack 500</b>. A plain subscription (CleanBox monthly) gives a license only; <b>CleanBox + AI</b> also adds 300 credits a month usable in CleanBox.</li>
+      <li>Use AI in App Shop: bundle credits go first, the pack stays.</li>
+      <li>CleanBox is not in the bundle: no license → 403. Buy it, then AI there spends only the pack.</li>
+      <li><b>Race ×5</b> = 5 separate actions at once: with enough credits all 5 are charged once each (the log checks balance before/after). On a small balance only as many pass as credits allow, the rest get 402.</li>
+      <li><b>Retry same key</b>: one charge, copies get 409, replay gets the stored result.</li>
+      <li>Flip “provider 5xx”, use AI: credits return to the same lots.</li>
+      <li>+15 days, then <b>refund</b> the bundle: apps by unused time, credits by unspent amount.</li>
+      <li>+31 days: renewals grant a new lot, old lots expire.</li>
+    </ol>
+  </section>
+
+  <section id="state" hx-get="/frag/state?c={{.Customer}}" hx-trigger="load, sse:changed throttle:300ms">loading…</section>
+
+  {{template "logpanel" .}}
+</main>
+{{template "foot" .}}{{end}}
+
+{{define "state"}}
+<h2>{{.Customer}} <span class="uid" title="{{.Me.ID}}">{{.Me.ID}}</span> <small>wallet total {{.Total}} credits{{if eq .Account "blocked"}} · <span class="err">blocked</span>{{end}}</small></h2>
+
+<h3>Apps — balance as each app sees it</h3>
+<table class="apps">
+<tr><th>App</th><th>License</th><th>Available here</th><th colspan="2">AI actions (price in credits)</th></tr>
+{{range .Apps}}
+<tr>
+  <td><b>{{.Name}}</b><div class="muted">{{.Vendor}}</div></td>
+  <td>{{if .Licensed}}<span class="ok">✓</span> <span class="muted">{{.LicenseFrom}}</span>{{else}}<span class="muted">none</span>{{end}}</td>
+  <td><b>{{.Available}}</b> <span class="muted">of {{.Total}}</span>
+    {{range .Sources}}<div class="muted small">{{.Remaining}} · {{.Label}} ({{if eq .Scope "platform"}}all apps{{else}}scoped{{end}})</div>{{end}}</td>
+  <td colspan="2">{{$app := .ID}}{{range .Actions}}
+    <div class="action-row"><span>{{.Code}} <span class="muted">{{.Price}} cr</span></span>
+    <span class="btns">
+    <button hx-post="/sim/charge" hx-vals='{"c":"{{$.Customer}}","app":"{{$app}}","action":"{{.Code}}"}' hx-swap="none">Use AI</button>
+    <button hx-post="/sim/race" hx-vals='{"c":"{{$.Customer}}","app":"{{$app}}","action":"{{.Code}}","n":"5"}' hx-swap="none" title="5 devices start 5 separate AI actions at the same moment. Each is charged once; when credits run out the rest get 402.">Race ×5</button>
+    <button hx-post="/sim/retry" hx-vals='{"c":"{{$.Customer}}","app":"{{$app}}","action":"{{.Code}}"}' hx-swap="none" title="One action whose request is sent 3 times at once with the same Idempotency-Key: charged once.">Retry same key</button>
+    </span></div>{{end}}
+  </td>
+</tr>
+{{end}}
+</table>
+
+<h3>Subscriptions</h3>
+{{if not .Subs}}<p class="muted">Nothing bought yet.</p>{{end}}
+<table>
+{{range .Subs}}
+<tr>
+  <td><b>{{.Offering}}</b><div class="muted">{{.Kind}} · {{short .ID}}</div></td>
+  <td><span class="st st-{{.Status}}">{{.Status}}</span>
+    {{if eq .Status "created"}}<div class="warnbox small">No payment recorded yet, so no licenses and no credits. If the provider charged the card, the invoice.paid webhook was lost — <a href="/reconcile?c={{$.Customer}}">Reconciliation</a> finds it and replays it.</div>{{end}}</td>
+  <td class="muted">{{if .End}}{{if eq .Status "canceled"}}access until{{else}}until{{end}} {{day .End}}{{end}}</td>
+  <td>
+    {{if .Quote}}<div class="small">refund now: <b>{{money .Quote.Refund}}</b>
+      <span class="muted">={{if .Quote.AppsPart}} apps {{money .Quote.AppsPart}}×{{pct .Quote.UnusedFrac}}{{end}}{{if and .Quote.AppsPart .Quote.CredPart}} +{{end}}{{if .Quote.CredPart}} credits {{money .Quote.CredPart}}×{{pct .Quote.CredFrac}}{{end}}</span></div>{{end}}
+  </td>
+  <td class="btns">
+    {{if ne .Status "canceled"}}
+    {{if ne .Kind "one_time"}}<button hx-post="/sim/cancel" hx-vals='{"sub":"{{.ID}}"}' hx-swap="none">Cancel at period end</button>{{end}}
+    {{if and .Quote .Quote.Refund}}<button class="danger" hx-post="/sim/refund" hx-vals='{"sub":"{{.ID}}"}' hx-swap="none">Refund</button>{{end}}
+    {{end}}
+  </td>
+</tr>
+{{end}}
+</table>
+
+<h3>Lots <small>spend order: bundle scope → bonus → soonest expiry</small></h3>
+<table>
+<tr><th>Lot</th><th>Scope</th><th>Granted</th><th>Remaining</th><th>Expires</th></tr>
+{{range .Lots}}
+<tr class="{{if or .Expired .Revoked}}dim{{end}}">
+  <td>{{.Label}} <div class="muted small">{{.Source}} · {{.Kind}}</div></td>
+  <td>{{if eq .Apps "all apps"}}all apps{{else}}only: {{.Apps}}{{end}} <div class="muted small">scope {{.Scope}}</div></td>
+  <td>{{.Granted}}</td>
+  <td><b>{{.Remaining}}</b>
+    <div class="bar"><i style="width: {{if .Granted}}{{printf "%.0f" (divf .Remaining .Granted)}}{{end}}%"></i></div></td>
+  <td class="muted">{{day .Expires}}{{if .Revoked}} · revoked (refund){{else if .Expired}} · expired{{end}}</td>
+</tr>
+{{end}}
+</table>
+
+<div class="two">
+<div>
+<h3>Ledger <small>append-only</small></h3>
+<table class="small">
+{{range .Ledger}}
+<tr><td class="muted">{{dt .At}}</td><td><span class="lt lt-{{.Type}}">{{.Type}}</span></td><td class="num {{if lt .Delta 0}}neg{{end}}">{{.Delta}}</td><td class="muted">{{.Lot}}{{if ne .Note .Lot}}<br>{{.Note}}{{end}}</td></tr>
+{{end}}
+</table>
+</div>
+<div>
+<h3>Credit charges <small>AI actions paid with credits · one row per Idempotency-Key</small></h3>
+{{if not .Charges}}<p class="muted small">No AI actions yet — press Use AI above.</p>{{end}}
+<table class="small">
+{{if .Charges}}<tr><th>When</th><th>App · action</th><th>Credits</th><th>Status</th><th>Idempotency-Key</th></tr>{{end}}
+{{range .Charges}}
+<tr><td class="muted">{{dt .At}}</td><td>{{.App}} <span class="muted">{{.Action}}</span></td><td class="num">{{.Amount}}</td><td><span class="st st-{{.Status}}">{{.Status}}</span></td><td class="muted">{{.Key}}</td></tr>
+{{end}}
+</table>
+</div>
+</div>
+{{end}}

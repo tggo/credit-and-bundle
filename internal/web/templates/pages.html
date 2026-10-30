@@ -1,0 +1,76 @@
+{{define "webhooks"}}{{template "head" .}}
+<main class="grid2">
+  <section>
+    <h2>Webhook scenarios <small>as {{.Customer}}</small></h2>
+    <div class="btns">
+      <button hx-post="/sim/wh/out-of-order" hx-vals='{"c":"{{.Customer}}","o":"off_appshop"}' hx-swap="none">invoice.paid before subscription.created</button>
+      <button hx-post="/sim/wh/dup" hx-vals='{"c":"{{.Customer}}"}' hx-swap="none">Duplicate invoice.paid</button>
+      <button hx-post="/sim/wh/late-created" hx-vals='{"c":"{{.Customer}}"}' hx-swap="none">Late subscription.created after cancel</button>
+      <button hx-post="/sim/wh/past-due" hx-vals='{"c":"{{.Customer}}"}' hx-swap="none">invoice.failed → paid (past_due → active)</button>
+    </div>
+    <p class="muted">Rules: dedup by event_id and payment_ref; unknown subscription → park and retry; allowed transitions only; terminal states never come back.</p>
+    <pre class="fsm">created ──paid──▶ active ◀──paid── past_due
+   │                │  └──failed──▶    │
+   └──canceled──────┴──canceled──▶ canceled (terminal)</pre>
+    <div hx-get="/frag/webhooks" hx-trigger="load, sse:changed throttle:300ms">loading…</div>
+  </section>
+  {{template "logpanel" .}}
+</main>
+{{template "foot" .}}{{end}}
+
+{{define "webhooks_frag"}}
+<h3>Subscriptions <small>all customers — the provider side does not know who is selected above</small></h3>
+<table class="small">
+<tr><th>provider ref</th><th>offering</th><th>status</th><th>period end</th></tr>
+{{range .Subs}}<tr><td>{{.Ref}}</td><td>{{.Offering}}</td><td><span class="st st-{{.Status}}">{{.Status}}</span></td><td class="muted">{{if .End}}{{day .End}}{{end}}</td></tr>{{end}}
+</table>
+<h3>Inbox <small>webhook_events, all customers</small></h3>
+<table class="small">
+<tr><th>received</th><th>event</th><th>type</th><th>result</th><th>reason</th></tr>
+{{range .Events}}
+<tr><td class="muted">{{dt .At}}</td><td>{{.ID}}</td><td>{{.Type}}</td><td><span class="wh wh-{{.Status}}">{{.Status}}</span></td><td class="muted">{{.Reason}}</td></tr>
+{{end}}
+</table>
+{{end}}
+
+{{define "reconcile"}}{{template "head" .}}
+<main class="grid2">
+  <section>
+    <h2>Daily reconciliation with the payment provider</h2>
+    <p>Webhooks get lost. Once a day we download the provider's list of transactions and compare it with our <code>payments</code>, one payment at a time (by <code>payment_ref</code>). Comparing only totals is not enough: a lost $10 payment and an extra $10 payment give equal totals but are two bugs.</p>
+    <p class="muted">In production this is the Billing team's job. Credits cares about the result: a refund found here must take back the credits and licenses.</p>
+    <table class="recon-help">
+      <tr><th>Break it</th><th>What happens</th><th>What reconciliation shows</th></tr>
+      <tr><td><button hx-post="/sim/flag" hx-vals='{"f":"lose"}' hx-swap="none">1. Lose next invoice.paid</button>
+              <button hx-post="/sim/buy" hx-vals='{"c":"{{.Customer}}","o":"off_pack500"}' hx-swap="none">2. Buy Credit pack 500</button></td>
+          <td>Customer pays, provider has the money, the webhook never reaches us.</td>
+          <td><b>missing_ours</b>: paid but got nothing. Fix: <i>Replay webhook</i> → credits granted.</td></tr>
+      <tr><td><button hx-post="/sim/recon/phantom" hx-swap="none">Payment only we know</button></td>
+          <td>Our DB has a payment the provider never charged (bug or fake webhook).</td>
+          <td><b>missing_provider</b>: rights without money. Manual review.</td></tr>
+      <tr><td><button hx-post="/sim/recon/silent-refund" hx-swap="none">Refund without webhook</button></td>
+          <td>Provider refunds the last payment and does not tell us.</td>
+          <td><b>status_mismatch</b>: money returned, rights kept. Fix: <i>Replay webhook</i> → rights revoked.</td></tr>
+    </table>
+    <h3>Result of today's run</h3>
+    <div hx-get="/frag/reconcile" hx-trigger="load, sse:changed throttle:300ms">loading…</div>
+  </section>
+  {{template "logpanel" .}}
+</main>
+{{template "foot" .}}{{end}}
+
+{{define "reconcile_frag"}}
+<p>Checked <b>{{.Checked}}</b> payment refs. Net totals: provider <b>{{money .Provider}}</b>, ours <b>{{money .Ours}}</b>.</p>
+{{if not .Rows}}<p class="ok">✓ No discrepancies.</p>{{end}}
+<table>
+{{if .Rows}}<tr><th>Problem</th><th>payment_ref</th><th>What it means</th><th>Fix</th></tr>{{end}}
+{{range .Rows}}
+<tr>
+  <td><span class="wh wh-rejected">{{.Kind}}</span></td>
+  <td>{{.PaymentRef}}</td>
+  <td class="muted">{{.Detail}}</td>
+  <td>{{if .Fixable}}<button hx-post="/sim/recon/fix" hx-vals='{"ref":"{{.PaymentRef}}"}' hx-swap="none">Replay webhook</button>{{else}}<span class="muted">manual review</span>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{end}}

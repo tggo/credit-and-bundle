@@ -1,0 +1,122 @@
+{{define "diagrams"}}{{template "head" .}}
+<link rel="preload" href="/static/fonts/DejaVuSans.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="/static/fonts/DejaVuSans-Bold.ttf" as="font" type="font/ttf" crossorigin>
+<div id="pz-editor">
+  <div class="pz-panel">
+    <div class="pz-head"><b class="pz-title"></b><span class="muted small">PlantUML · live preview · saved for everyone</span>
+      <span class="pz-actions"><button class="pz-reset danger">Reset to default</button><button class="pz-close">Cancel</button><button class="pz-save primary">Save</button></span></div>
+    <div class="pz-body"><div class="pz-code"></div><div class="pz-preview" title="Click an element to jump to its line"></div></div>
+    <div class="pz-msg"></div>
+  </div>
+</div>
+<main class="wide diagrams">
+  <div class="dtabs">
+    <a href="#flow">Live credit flow</a>
+    <a href="/board?b=current&c={{.Customer}}">Current model ↗ Board</a>
+    <a href="/board?b=changed&c={{.Customer}}">Changed model ↗ Board</a>
+    <a href="#flow_changed">Model flow</a>
+    <a href="#domains">Services</a>
+    <a href="#purchase">Purchase</a>
+    <a href="#states">Subscription states</a>
+    <a href="#grants">Grants and refund</a>
+    <a href="#charge">Charge</a>
+    <a href="#migration">Migration</a>
+  </div>
+
+  <section id="flow">
+    <h2>Live credit flow <small>{{.Customer}} · from the ledger: lots → where credits went</small></h2>
+    <div hx-get="/frag/flow?c={{.Customer}}" hx-trigger="load, sse:changed throttle:500ms">loading…</div>
+  </section>
+
+
+
+  <section id="flow_current">
+    <h2>Model flow: current <small>one purchase = one app = one license</small></h2>
+    <button class="pz-edit" data-diagram="flow_current">Edit source</button>
+    <div class="mm pz" data-diagram="flow_current" title="Click to edit">{{diagram "flow_current"}}</div>
+  </section>
+  <section id="flow_changed">
+    <h2>Model flow: changed <small>one Offering = N items; every Payment grants a License per plan item and a Credit lot per credit item</small></h2>
+    <button class="pz-edit" data-diagram="flow_changed">Edit source</button>
+    <div class="mm pz" data-diagram="flow_changed" title="Click to edit">{{diagram "flow_changed"}}</div>
+  </section>
+  <section id="domains">
+    <h2>Services <small>who owns what; Billing stays with the Billing team</small></h2>
+    <button class="pz-edit" data-diagram="domains">Edit source</button>
+    <div class="mm pz" data-diagram="domains" title="Click to edit">{{diagram "domains"}}</div>
+  </section>
+  <section id="purchase">
+    <h2>Purchase <small>from the store to the first AI action and the next period</small></h2>
+    <button class="pz-edit" data-diagram="purchase">Edit source</button>
+    <div class="mm pz" data-diagram="purchase" title="Click to edit">{{diagram "purchase"}}</div>
+  </section>
+  <section id="states">
+    <h2>Subscription states <small>allowed transitions only; canceled is terminal (simulated Billing)</small></h2>
+    <button class="pz-edit" data-diagram="states">Edit source</button>
+    <div class="mm pz" data-diagram="states" title="Click to edit">{{diagram "states"}}</div>
+  </section>
+
+  <section id="grants">
+    <h2>Payment → grants, refund → revoke <small>one transaction each; a refund marks every lot of the payment revoked, even one at 0</small></h2>
+    <button class="pz-edit" data-diagram="grants">Edit source</button>
+    <div class="mm pz" data-diagram="grants" title="Click to edit">{{diagram "grants"}}</div>
+  </section>
+
+  <section id="migration">
+    <h2>Migration <small>expand → backfill → dual-write → inventory → contract; a gate before every step</small></h2>
+    <button class="pz-edit" data-diagram="migration">Edit source</button>
+    <div class="mm pz" data-diagram="migration" title="Click to edit">{{diagram "migration"}}</div>
+  </section>
+  <section id="charge">
+    <h2>Charge <small>checks → one short transaction → AI call after commit → sweeper</small></h2>
+    <button class="pz-edit" data-diagram="charge">Edit source</button>
+    <div class="mm pz" data-diagram="charge" title="Click to edit">{{diagram "charge"}}</div>
+  </section>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "loose",
+    themeVariables: { fontSize: "14px" },
+    er: { useMaxWidth: false }, sequence: { useMaxWidth: false, mirrorActors: false }, state: { useMaxWidth: false },
+    sankey: { width: 1100, height: 420, showValues: true, linkColor: "source" } });
+
+  async function draw(root) {
+    const nodes = [...root.querySelectorAll("pre.mermaid:not([data-processed])")];
+    if (!nodes.length) return;
+    await mermaid.run({ nodes });
+    nodes.forEach(n => {
+      const svg = n.querySelector("svg");
+      if (!svg || svg.dataset.pz) return;
+      svg.dataset.pz = 1;
+      const bb = svg.getBBox();
+      svg.removeAttribute("width");
+      svg.style.maxWidth = "none";
+      svg.style.width = "100%";
+      const w = svg.parentElement.clientWidth;
+      const h = Math.max(260, Math.min(820, bb.height * Math.min(1, w / bb.width) + 40));
+      svg.style.height = h + "px";
+      try { const pz = window.svgPanZoom(svg, { zoomEnabled: true, controlIconsEnabled: true, fit: true, center: true, minZoom: 0.3, maxZoom: 8 });
+        pz.resize(); pz.fit(); pz.center(); } catch (e) { console.warn("pan-zoom", e); }
+    });
+  }
+  window.drawMermaid = draw;
+  draw(document);
+  document.body.addEventListener("htmx:afterSwap", e => draw(e.target));
+</script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/mode/simple.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+<script src="/static/diagrams.js?v={{.V}}"></script>
+{{template "foot" .}}{{end}}
+
+{{define "flow_frag"}}
+{{if .Rows}}
+<div class="mm"><pre class="mermaid">
+sankey-beta
+{{range .Rows}}{{.}}
+{{end}}</pre></div>
+<p class="muted small">Left: lots (where credits came from). Right: apps that spent them, refunds back, expired, revoked by payment refund, still remaining.</p>
+{{else}}<p class="muted">No credits yet — buy a bundle or a pack in the Simulator.</p>{{end}}
+{{end}}

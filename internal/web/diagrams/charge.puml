@@ -1,0 +1,56 @@
+@startuml
+!include skin.iuml
+hide footbox
+autonumber
+participant "Vendor app" as App
+participant "AI Gateway\n(stateless, N instances)" as GW
+participant "Credits service" as CR
+participant "License" as L
+participant "Catalog" as CAT
+database "Credits DB\n(owned by Credits)" as DB
+participant "AI provider" as AI
+
+== 1. Checks — no transaction yet ==
+App -> GW : POST /api/v1/credits/charges\nIdempotency-Key, application_id, action_code, input
+GW -> CR : Charge(customer, app, action, key, input)
+CR -> DB : key already stored?
+note right : yes → return the stored answer, **before** any check:\ncompleted 200 · in_progress 409 · other body 422
+CR -> L : license active? — no → **403**
+CR -> CAT : action price — none → **404**
+
+== 2. Debit — one short transaction (milliseconds) ==
+group BEGIN … COMMIT
+  CR -> DB : lock credit_account FOR UPDATE\n(first: otherwise deadlock)
+  CR -> DB : insert charge in_progress\nUK (account_id, idempotency_key)
+  CR -> DB : pick lots: bundle / in-app scope → bonus → soonest expiry
+  CR -> DB : debit lots + ledger "charge" row per lot
+  alt not enough credits
+    CR -> DB : ROLLBACK
+    CR --> GW : **402** insufficient_credits (nothing stored)
+  else enough
+    CR -> DB : COMMIT — wallet unlocked
+    CR --> GW : charge_id
+  end
+end
+
+== 3. AI call — after commit, outside the transaction (seconds) ==
+note over GW, AI #fff4d6
+  Why outside: the AI answers in seconds. Holding the wallet lock that long
+  would block every other device of this customer. Credits are already taken,
+  so a failure is fixed by a refund, not by a rollback.
+end note
+GW -> AI : request (max_tokens capped to the price)
+alt success, or content-policy block (provider did the work)
+  GW -> CR : Complete(charge_id, result, cost)
+  CR -> DB : charge completed, result stored for replays
+  GW --> App : **201** result + available here
+else provider 5xx / timeout
+  GW -> CR : Refund(charge_id)
+  CR -> DB : ledger "refund" into the same lots\n(lot revoked or expired → burned at once)
+  GW --> App : **502** upstream_failed, refunded: true
+end
+
+== 4. Gateway died between 2 and 3 ==
+CR -> DB : sweeper, every 15 s: in_progress older than 2 min\n→ refunded, credits back to the same lots\n(revoked_at set or expired → burned, not revived)
+note right : UPDATE … WHERE status = 'in_progress':\nonly one of sweeper / late Refund / late Complete wins
+@enduml

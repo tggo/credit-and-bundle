@@ -1,0 +1,41 @@
+@startuml
+!include skin.iuml
+skinparam defaultFontSize 14
+skinparam roundCorner 24
+skinparam RectangleBackgroundColor #e5dbff
+skinparam RectangleBorderColor #5f3dc4
+skinparam PackageBorderColor #adb5bd
+skinparam PackageFontColor #495057
+left to right direction
+title Changed model: one Offering = N items; every Payment grants per item
+
+package "Catalog — what is sold" {
+  rectangle "Application" as A
+  rectangle "Plan\nslots · licensing" as P
+  rectangle "Credit package\ncredits · validity" as CP
+  rectangle "Offering item\nshare of price" as OI
+  rectangle "Offering\nprice · period" as O
+}
+package "Billing — what is paid" {
+  rectangle "Subscription" as S
+  rectangle "Payment\nevery period" as PAY
+}
+package "License + Credits — granted in one tx per Payment" {
+  rectangle "License\n(customer, application)" as L
+  rectangle "Credit lot\nscope = apps · expires" as LOT
+}
+package "Spend" {
+  rectangle "Charge\nper AI action" as CH
+}
+
+A --> P : 1 : N
+P --> OI : plan item
+CP --> OI : credit item
+OI --> O : N items
+O --> S : bought as
+S --> PAY : 1 : N
+PAY --> L : per plan item
+PAY --> LOT : per credit item
+LOT --> CH : debited by
+L ..> CH : checked before
+@enduml
